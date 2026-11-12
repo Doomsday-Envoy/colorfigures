@@ -1,0 +1,297 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<meta name="color-scheme" content="light">
+<title>T4噬菌体DNA注入 | by Doomsday_Envoy</title>
+<style>
+  @font-face{
+    font-family:"Unifont Embedded";
+    src:url("assets/fonts/unifont-18.0.01-subset.woff2") format("woff2");
+    font-style:normal;
+    font-weight:400;
+    font-display:swap;
+  }
+  :root{
+    --paper:#f2efe7;
+    --paper-deep:#e8e2d6;
+    --ink:#231e16;
+    --muted:#7d7567;
+    --rule:#d5cdbf;
+    --accent:#f4b829;
+    --nav-width:clamp(164px,13vw,208px);
+  }
+  *{box-sizing:border-box}
+  html,body{width:100%;height:100%;margin:0}
+  body{
+    overflow:hidden;
+    color:var(--ink);
+    background-color:var(--paper);
+    background-image:url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='320' height='320'%3E%3Cfilter id='p'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='.85' numOctaves='3' stitchTiles='stitch'/%3E%3CfeColorMatrix values='0 0 0 0 .42 0 0 0 0 .39 0 0 0 0 .33 .16 0 0 0 0'/%3E%3C/filter%3E%3Crect width='100%25' height='100%25' filter='url(%23p)'/%3E%3C/svg%3E");
+    font:16px/1.4 "Unifont Embedded","Unifont",ui-monospace,SFMono-Regular,Consolas,"Liberation Mono",monospace;
+    -webkit-font-smoothing:none;
+    text-rendering:geometricPrecision;
+  }
+  button{font:inherit}
+  .layout{
+    position:relative;
+    width:100%;
+    height:100vh;
+    height:100dvh;
+    overflow:hidden;
+  }
+  .catalog{
+    position:absolute;
+    z-index:3;
+    top:24px;
+    left:clamp(12px,1.7vw,26px);
+    width:var(--nav-width);
+    pointer-events:none;
+  }
+  .catalog-head{
+    display:flex;
+    align-items:baseline;
+    gap:7px;
+    margin:0 2px 8px;
+    white-space:nowrap;
+  }
+  .catalog-kicker{
+    margin:0;
+    color:var(--muted);
+    font-size:9.5px;
+    font-weight:700;
+    letter-spacing:.04em;
+  }
+  .catalog h1{
+    margin:0;
+    font-size:11px;
+    line-height:1.2;
+    font-weight:700;
+    letter-spacing:.08em;
+  }
+  .catalog-list{
+    display:flex;
+    min-height:0;
+    flex-direction:column;
+    gap:6px;
+    overflow:auto;
+    scrollbar-width:thin;
+    scrollbar-color:var(--muted) transparent;
+    pointer-events:auto;
+  }
+  .catalog-link{
+    display:flex;
+    width:100%;
+    min-height:34px;
+    flex:0 0 auto;
+    align-items:center;
+    gap:7px;
+    padding:6px 10px;
+    color:var(--ink);
+    text-align:left;
+    background:rgba(242,239,231,.92);
+    border:1.25px solid var(--ink);
+    border-radius:999px;
+    cursor:pointer;
+    transition:background-color .16s ease,color .16s ease;
+  }
+  .catalog-link:hover{
+    background:var(--accent);
+  }
+  .catalog-link:focus-visible{
+    outline:3px solid var(--accent);
+    outline-offset:3px;
+  }
+  .catalog-link[aria-current="page"]{
+    color:var(--paper);
+    background:var(--ink);
+  }
+  .catalog-number{
+    min-width:2ch;
+    color:var(--muted);
+    font-size:10px;
+    font-weight:700;
+    letter-spacing:.06em;
+  }
+  .catalog-link[aria-current="page"] .catalog-number{
+    color:var(--accent);
+  }
+  .catalog-name{
+    min-width:0;
+    font-size:12px;
+    font-weight:700;
+    line-height:1.25;
+    white-space:nowrap;
+  }
+  .figure-shell{
+    width:100%;
+    height:100%;
+    background:var(--paper);
+  }
+  .figure-frame{
+    display:block;
+    width:100%;
+    height:100%;
+    background:var(--paper);
+    border:0;
+    opacity:0;
+    transition:opacity .18s ease;
+  }
+  .figure-frame.is-ready{opacity:1}
+  .noscript{
+    position:absolute;
+    inset:24px;
+    display:grid;
+    place-items:center;
+    padding:24px;
+    color:var(--ink);
+    text-align:center;
+    background:var(--paper);
+    border:1.5px solid var(--ink);
+    border-radius:18px;
+  }
+  @media (max-width:1180px){
+    .layout{
+      display:grid;
+      grid-template-columns:1fr;
+      grid-template-rows:auto minmax(0,1fr);
+    }
+    .catalog{
+      position:relative;
+      inset:auto;
+      display:flex;
+      width:100%;
+      align-items:center;
+      gap:12px;
+      padding:8px 12px;
+      background:var(--paper);
+      border-bottom:1.5px solid var(--ink);
+      pointer-events:auto;
+    }
+    .catalog-head{flex:0 0 auto;margin:0}
+    .catalog-kicker{font-size:9px}
+    .catalog h1{font-size:10px}
+    .catalog-list{
+      flex-direction:row;
+      gap:6px;
+      padding:2px;
+      overflow-x:auto;
+      overflow-y:hidden;
+    }
+    .catalog-link{
+      width:auto;
+      min-height:32px;
+      padding:5px 10px;
+    }
+    .catalog-name{font-size:12px}
+    .figure-shell{min-height:0}
+  }
+  @media (prefers-reduced-motion:reduce){
+    *,*::before,*::after{
+      scroll-behavior:auto!important;
+      transition-duration:.01ms!important;
+      animation-duration:.01ms!important;
+      animation-iteration-count:1!important;
+    }
+  }
+</style>
+</head>
+<body>
+<div class="layout">
+  <aside class="catalog" aria-label="by Doomsday_Envoy 作品目录">
+    <header class="catalog-head">
+      <p class="catalog-kicker">by Doomsday_Envoy</p>
+      <h1>作品目录</h1>
+    </header>
+    <nav class="catalog-list" aria-label="互动作品">
+      <!-- 新增作品时复制按钮，并填写唯一的 data-id、data-src 与 data-title。 -->
+      <button
+        class="catalog-link"
+        type="button"
+        data-id="t4-dna-injection"
+        data-src="figures/T4噬菌体DNA注入.html"
+        data-title="T4噬菌体DNA注入"
+        aria-current="page"
+      >
+        <span class="catalog-number">01</span>
+        <span class="catalog-name">T4噬菌体DNA注入</span>
+      </button>
+    </nav>
+  </aside>
+  <main class="figure-shell">
+    <iframe
+      class="figure-frame is-ready"
+      id="figure-frame"
+      src="figures/T4噬菌体DNA注入.html"
+      title="T4噬菌体DNA注入互动页面"
+      data-entry="t4-dna-injection"
+    ></iframe>
+    <noscript><div class="noscript">需要启用 JavaScript 才能切换作品。</div></noscript>
+  </main>
+</div>
+<script>
+(() => {
+  const frame = document.getElementById('figure-frame');
+  const links = Array.from(document.querySelectorAll('.catalog-link[data-src]'));
+
+  if (!frame || !links.length) return;
+
+  const byId = id => links.find(link => link.dataset.id === id);
+  const hashId = () => {
+    try {
+      return decodeURIComponent(location.hash.slice(1));
+    } catch {
+      return location.hash.slice(1);
+    }
+  };
+
+  const writeHash = (id, mode = 'replace') => {
+    const next = `#${encodeURIComponent(id)}`;
+    try {
+      history[mode === 'push' ? 'pushState' : 'replaceState'](null, '', next);
+    } catch {
+      location.hash = id;
+    }
+  };
+
+  const activate = (link, { url = true, mode = 'replace' } = {}) => {
+    if (!link) return;
+    const { id, src, title } = link.dataset;
+
+    links.forEach(item => {
+      if (item === link) item.setAttribute('aria-current', 'page');
+      else item.removeAttribute('aria-current');
+    });
+
+    if (frame.dataset.entry !== id) {
+      frame.classList.remove('is-ready');
+      frame.dataset.entry = id;
+      frame.src = src;
+    }
+
+    frame.title = `${title}互动页面`;
+    document.title = `${title} | by Doomsday_Envoy`;
+    if (url) writeHash(id, mode);
+  };
+
+  links.forEach(link => {
+    link.addEventListener('click', () => activate(link, { mode: 'push' }));
+  });
+
+  frame.addEventListener('load', () => frame.classList.add('is-ready'));
+
+  const syncFromUrl = () => {
+    const requested = byId(hashId());
+    activate(requested || links[0], { url: false });
+  };
+
+  window.addEventListener('hashchange', syncFromUrl);
+  window.addEventListener('popstate', syncFromUrl);
+
+  const initial = byId(hashId()) || links[0];
+  activate(initial, { url: !byId(hashId()), mode: 'replace' });
+})();
+</script>
+</body>
+</html>

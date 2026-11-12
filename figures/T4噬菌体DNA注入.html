@@ -1,0 +1,2211 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>T4 噬菌体注入 DNA</title>
+<style>.mcap{display:none!important}@media (max-width:560px){.stat .v{font-size:20px!important}.stats{align-items:flex-end}}@media (min-width:561px){.vset{top:4px!important}#stats{top:var(--vset-h,44px)!important}}</style><style>@media (max-width:560px){body > header{display:none}}</style><script>window.FIG_A = () => innerWidth <= 560 ? 1.1 : .75;</script><script>window.LBL_U = () => { if (innerWidth > 560) return 0; const s = document.getElementById("fig"); return s && s.clientWidth && s.viewBox.baseVal.width ? s.viewBox.baseVal.width / s.clientWidth : 0; };</script></head>
+<body>
+<script>
+/* ============================================================
+   Colorfigures core: projection, shapes, shading, ink, labels, page shell.
+   A figure page includes this file (scripts/build.py inlines it), then calls mountFigure({...}).
+   See SKILL.md for the drawing contract and conventions.
+   One fixed view (front-left-top) and one fixed light (from above, behind the viewer's right shoulder: the front is lit,
+   the left side is in shade, and cast shadows fall toward the lower left of the screen).
+   ============================================================ */
+
+/* ---------- palettes ---------- */
+const PALS = {
+  mustard: { l:'#f4b829', m:'#d49c1f', d:'#4e4a18' },
+  tomato:  { l:'#ef6a4c', m:'#cf5038', d:'#4a2219' },
+  mint:    { l:'#93d3b0', m:'#71b693', d:'#1f4034' },
+  cobalt:  { l:'#76a0e2', m:'#5a82c6', d:'#1c2948' },
+  blush:   { l:'#f3a6bb', m:'#d8869c', d:'#4b2430' },
+};
+const METAL   = { l:'#eef0f0', m:'#c6ccce', d:'#8f989b' };
+const CLEAR   = { l:'#e4f2f4', m:'#c4dfe4', d:'#97b9c0' };
+const CERAMIC = { l:'#fbfaf3', m:'#e3e0d2', d:'#bdb8a6' };
+const DARK    = { l:'#55504a', m:'#3d3935', d:'#272421' };
+const INK = '#231e16';
+const SHADOW = '#41538f';
+
+/* ---------- projection (x = depth toward viewer-right, y = toward viewer-left, z = up) ---------- */
+const C = Math.cos(Math.PI/6), S = Math.sin(Math.PI/6);
+let OX = 0, OY = 0;
+/* Free orthographic camera (internal names start with CAM_ / cam so they never clash with a figure's own names). YAW turns the viewer around the vertical axis (45° = the classic front-left view),
+   PITCH is how far it looks down (35.26° = true isometric). At the defaults P() is exactly the old isometric
+   projection, so every figure drawn for it still lines up. Drag the figure to orbit; double-click to reset.
+   rotV(n) maps a world direction into the default view's frame, so vis / tone / any "sum of rotV > 0" test keep
+   working at every angle: the viewer is always (1,1,1) and the light stays put relative to the viewer. */
+let VIEW = 0, RC = [0, 0], RCZ = 0;
+const VIEW_NAMES = ['front', 'left side', 'back', 'right side'];
+const TURNS = [0, 2];
+const YAW0 = 45, PITCH0 = Math.atan(1/Math.SQRT2) * 180/Math.PI, CAM_K = Math.sqrt(1.5);
+let YAW = YAW0, PITCH = PITCH0, CAM_R, CAM_U, CAM_V, CAM_D;                       // right, up, toward viewer, screen-down
+const camBasis = (yaw, pitch) => { const t = yaw*Math.PI/180, p = pitch*Math.PI/180, ct = Math.cos(t), st = Math.sin(t), cp = Math.cos(p), sp2 = Math.sin(p);
+  return { R:[st,-ct,0], U:[-sp2*ct,-sp2*st,cp], V:[cp*ct,cp*st,sp2] }; };
+const CAM_B0 = camBasis(YAW0, PITCH0);
+// CAM_LIM: how far (deg) the camera may turn either side of the front view; null = all the way round (set per figure)
+let CAM_LIM = null;
+function setCam(yaw, pitch){ YAW = CAM_LIM == null ? yaw : Math.max(YAW0 - CAM_LIM, Math.min(YAW0 + CAM_LIM, yaw));
+  PITCH = CAM_LIM == null ? Math.max(6, Math.min(78, pitch)) : Math.max(15, Math.min(62, pitch)); const b = camBasis(YAW, PITCH); CAM_R = b.R; CAM_U = b.U; CAM_V = b.V; CAM_D = CAM_U.map(v => -v); }
+setCam(YAW0, PITCH0);
+const camDot = (a,b) => a[0]*b[0]+a[1]*b[1]+a[2]*b[2];
+const rotV = n => { const r = camDot(n,CAM_R), u = camDot(n,CAM_U), v = camDot(n,CAM_V); return [0,1,2].map(i => CAM_B0.R[i]*r + CAM_B0.U[i]*u + CAM_B0.V[i]*v); };
+// the light's ground direction turns with the viewer's yaw only (shadows always fall toward the lower left of the screen)
+const yawTurn = ([x,y]) => { const t = (YAW - YAW0)*Math.PI/180, c = Math.cos(t), s = Math.sin(t); return [x*c - y*s, x*s + y*c]; };
+const rotXY = (x,y) => [x, y];                                                // kept for old callers
+const P0 = (x,y,z) => [(x-y)*C + OX, (x+y)*S - z + OY];                       // raw iso
+const P  = (x,y,z) => { const q = [x-RC[0], y-RC[1], z-RCZ];
+  return [CAM_K*camDot(q,CAM_R) + (RC[0]-RC[1])*C + OX, CAM_K*camDot(q,CAM_D) + (RC[0]+RC[1])*S - RCZ + OY]; };
+const Dv = (x,y,z) => [CAM_K*camDot([x,y,z],CAM_R), CAM_K*camDot([x,y,z],CAM_D)];
+// distance toward the viewer: draw parts with smaller depth first
+const depthOf = p => camDot(p, CAM_V);
+// sort [{at:[x,y,z], svg}] back-to-front for the current camera. A part may also give box:[[x0,y0,z0],[x1,y1,z1]]:
+// when two boxes are separated along x, y or z, the one on the viewer's side goes last (a centre point alone gets long
+// or wrapping parts wrong: a pole beside a row of keys, a spout reaching past a cup).
+const boxMid = b => [0,1,2].map(k => (b[0][k] + b[1][k]) / 2);
+const sepOrder = (p, q) => { if (!p.box || !q.box) return 0;
+  for (let k = 0; k < 3; k++){ if (p.box[1][k] <= q.box[0][k] + 1e-6) return CAM_V[k] >= 0 ? -1 : 1; if (q.box[1][k] <= p.box[0][k] + 1e-6) return CAM_V[k] >= 0 ? 1 : -1; }
+  return 0; };
+const byDepth = parts => parts.filter(Boolean).sort((p,q) => sepOrder(p,q) || (depthOf(p.at || boxMid(p.box)) - depthOf(q.at || boxMid(q.box)))).map(p => p.svg).join('');
+// the half of a vertical ring that faces the viewer / is turned away, as [from, to] angles in degrees (0 = +x, 90 = +y)
+const nearHalf = () => [YAW - 90, YAW + 90], farHalf = () => [YAW + 90, YAW + 270];
+// an open container (cup, bin, cone, drum) between two rings: far inner wall, then its contents, then the near outer wall
+const openShell = (A, B, colour, contents = '') => loft(A, B, colour, true) + contents + loft(A, B, colour);
+const f  = v => v.toFixed(1);
+const pd = (pts, close=true) => 'M' + pts.map(p => { const q = P(p[0],p[1],p[2]); return f(q[0])+' '+f(q[1]); }).join('L') + (close ? 'Z' : '');
+const sp = pts => 'M' + pts.map(q => f(q[0])+' '+f(q[1])).join('L') + 'Z';
+
+/* ---------- 2D shapes in a plane's (u,v) coords (v up), mapped to 3D by a plane ---------- */
+const arcUV  = (cu,cv,r,a0,a1,n=7) => { const o=[]; for (let i=0;i<=n;i++){ const a=(a0+(a1-a0)*i/n)*Math.PI/180; o.push([cu+r*Math.cos(a), cv+r*Math.sin(a)]); } return o; };
+const rrUV   = (u0,v0,u1,v1,r,n=7) => r <= 0 ? rectUV(u0,v0,u1,v1) : [...arcUV(u1-r,v0+r,r,-90,0,n), ...arcUV(u1-r,v1-r,r,0,90,n), ...arcUV(u0+r,v1-r,r,90,180,n), ...arcUV(u0+r,v0+r,r,180,270,n)];
+const rectUV = (u0,v0,u1,v1) => [[u0,v0],[u1,v0],[u1,v1],[u0,v1]];
+const ellUV  = (cu,cv,ru,rv,n=24) => Array.from({length:n}, (_,i) => { const a=i/n*2*Math.PI; return [cu+ru*Math.cos(a), cv+rv*Math.sin(a)]; });
+const PX = x => ([u,v]) => [x,u,v];      // front-facing plane x = const   (u = y, v = z)
+const PY = y => ([u,v]) => [u,y,v];      // side plane y = const           (u = x, v = z)
+const PZ = z => ([u,v]) => [u,v,z];      // horizontal plane z = const     (u = x, v = y)
+const on = (plane, uv) => uv.map(plane);
+
+/* ---------- vectors + shading ---------- */
+const sub=(a,b)=>[a[0]-b[0],a[1]-b[1],a[2]-b[2]], dot=(a,b)=>a[0]*b[0]+a[1]*b[1]+a[2]*b[2];
+const cross=(a,b)=>[a[1]*b[2]-a[2]*b[1], a[2]*b[0]-a[0]*b[2], a[0]*b[1]-a[1]*b[0]];
+const norm=a=>{ const l=Math.hypot(...a)||1; return a.map(v=>v/l); };
+const avg=ps=>ps.reduce((s,p)=>[s[0]+p[0]/ps.length,s[1]+p[1]/ps.length,s[2]+p[2]/ps.length],[0,0,0]);
+const vis = n => { const r = rotV(n); return r[0]+r[1]+r[2] > 1e-6; };   // viewer looks from (+1,+1,+1) after the turn
+const facing = vis;                                                       // readable alias: is this face toward the viewer?
+const SHADOW_K = 0.85, AZ_MIN = 20, AZ_MAX = 160;
+// cast shadows are drawn shorter than the shading light implies (0.45 × height instead of 0.85 ×): long shadows of tall
+// parts on thin supports (a lamp shade, a fan head) land far from the object and read as separate blobs
+const SHADOW_LEN = 0.45;
+let L = [0,0,1], SH = [0,0];
+function setLight(deg){ const a=deg*Math.PI/180; SH=[SHADOW_K*Math.cos(a), SHADOW_K*Math.sin(a)]; L=norm([-SH[0],-SH[1],1]); }
+const LIN = norm([.6,.2,1]);                       // fixed light for interiors / small props
+// Three flat tones, but blended across a narrow band at each step, so a face that turns past a threshold while the
+// figure rotates fades between tones instead of snapping (at rest almost every face still sits on a pure tone).
+const SOFT = .18;
+const step3 = (d, hi, lo, m) => { const ss = (a, b, x) => { const k = Math.min(1, Math.max(0, (x - a)/(b - a))); return k*k*(3 - 2*k); };
+  const a = ss(hi - SOFT, hi + SOFT, d), b = ss(lo - SOFT, lo + SOFT, d);
+  return a >= 1 ? m.l : b <= 0 ? m.d : a > 0 ? mix(m.m, m.l, a) : b < 1 ? mix(m.d, m.m, b) : m.m; };
+const tone  = (n,m) => step3(dot(rotV(n),L),   -.15, -.45, m);   // exterior, follows the sun
+const toneI = (n,m) => step3(dot(rotV(n),LIN),  .6,   .05, m);   // interior / props
+const mix = (a,b,t) => '#' + [1,3,5].map(i => Math.round(parseInt(a.substr(i,2),16)*(1-t) + parseInt(b.substr(i,2),16)*t).toString(16).padStart(2,'0')).join('');
+const matOf = hex => ({ l:hex, m:mix(hex,'#000000',.16), d:mix(hex,'#000000',.42) });
+const ease = t => t<.5 ? 2*t*t : 1-Math.pow(-2*t+2,2)/2;
+
+/* ---------- drawing primitives (all return SVG strings) ---------- */
+const ink   = (d,w=1.0) => `<path d="${d}" fill="none" stroke="${INK}" stroke-width="${w}" stroke-linejoin="round" stroke-linecap="round"/>`;
+const fill  = (d,c,extra='') => `<path d="${d}" fill="${c}" ${extra}/>`;
+const face  = (d,c) => `<path d="${d}" fill="${c}" stroke="${c}" stroke-width=".7" stroke-linejoin="round"/>`;
+const shape = (pts,c,w=.9) => fill(pd(pts),c) + (w ? ink(pd(pts),w) : '');
+const line  = (pts,w=.9) => ink(pd(pts,false),w);
+// Loft between two rings of equal length (closed). colour(n) picks each strip's fill; flip = seen from inside.
+function loft(A, B, colour, flip=false){
+  const n=A.length, cen=avg(A.concat(B)); let s='';
+  for (let i=0;i<n;i++){
+    const a0=A[i], a1=A[(i+1)%n], b1=B[(i+1)%n], b0=B[i];
+    let nr = norm(cross(sub(a1,a0), sub(b0,a0)));
+    if (!isFinite(nr[0])) continue;
+    if (dot(nr, sub(avg([a0,a1,b1,b0]), cen)) < 0) nr = nr.map(v=>-v);
+    if (flip) nr = nr.map(v=>-v);
+    if (vis(nr)) s += face(pd([a0,a1,b1,b0]), colour(nr));
+  }
+  return s;
+}
+function hull(pts){
+  pts = pts.slice().sort((a,b)=>a[0]-b[0]||a[1]-b[1]);
+  const cr=(o,a,b)=>(a[0]-o[0])*(b[1]-o[1])-(a[1]-o[1])*(b[0]-o[0]); const lo=[], up=[];
+  for (const p of pts){ while(lo.length>=2 && cr(lo[lo.length-2],lo[lo.length-1],p)<=0) lo.pop(); lo.push(p); }
+  for (const p of pts.reverse()){ while(up.length>=2 && cr(up[up.length-2],up[up.length-1],p)<=0) up.pop(); up.push(p); }
+  lo.pop(); up.pop(); return lo.concat(up);
+}
+// Silhouette ink, weighted by how thick the part is on screen (like a hand inker): the w you pass is the most it gets.
+// Thickness = 2 × area / perimeter of the outline (a rod's diameter, about half a box's width), as a share of the
+// frame width. A long thin rod, a handle or a knob stays light (~1–1.5); a grinder, kettle or machine body gets the
+// heavy ~2.4–2.8. Thin parts stay thin and parts keep air between them.
+const hullInk = (pts3, w=1.4) => { const h = hull(pts3.map(p=>P(...p))); let a = 0, per = 0;
+  for (let i = 0; i < h.length; i++){ const p = h[i], q = h[(i+1) % h.length]; a += p[0]*q[1] - q[0]*p[1]; per += Math.hypot(q[0]-p[0], q[1]-p[1]); }
+  const thick = per ? Math.abs(a) / per / (INK_K * INK_REF_VB) : 0;
+  return ink(sp(h), Math.min(w, .9 + 20*thick)); };
+// Axis-aligned box: three visible faces, shaded, each outlined. shade = tone (sunlit) or toneI (interior).
+function box(x0,y0,z0,x1,y1,z1,m,shade=toneI,w=.9){
+  // all six faces, drawn only when they face the viewer (sides first, then top) — correct in every VIEW
+  const F = [
+    [[0,1,0],  [[x0,y1,z0],[x1,y1,z0],[x1,y1,z1],[x0,y1,z1]]],
+    [[1,0,0],  [[x1,y0,z0],[x1,y1,z0],[x1,y1,z1],[x1,y0,z1]]],
+    [[0,-1,0], [[x0,y0,z0],[x1,y0,z0],[x1,y0,z1],[x0,y0,z1]]],
+    [[-1,0,0], [[x0,y0,z0],[x0,y1,z0],[x0,y1,z1],[x0,y0,z1]]],
+    [[0,0,1],  [[x0,y0,z1],[x1,y0,z1],[x1,y1,z1],[x0,y1,z1]]] ];
+  return F.filter(([n]) => vis(n)).map(([n,q]) => shape(q, shade(n,m), w)).join('');
+}
+// Rounded-profile extrusion: profile (u=y, v=z) swept along x from x0 to x1. Body of most machines.
+function extrude(profileUV, x0, x1, m, shade=tone){ return loft(on(PX(x0),profileUV), on(PX(x1),profileUV), n=>shade(n,m)); }
+// Vertical cylinder (axis z) centred (x,y), radius r from z0 to z1, with top cap.
+function cyl(x,y,z0,z1,r,m,shade=toneI,w=1.2,n=24){
+  const A=on(PZ(z0),ellUV(x,y,r,r,n)), B=on(PZ(z1),ellUV(x,y,r,r,n));
+  return loft(A,B,nr=>shade(nr,m)) + fill(pd(B),shade([0,0,1],m)) + hullInk([...A,...B],w) + ink(pd(B),w*.8);
+}
+// Cylinder lying along x (e.g. a knob or dial sticking out of a front face): centred (y,z), from x0 to x1.
+function cylX(x0,x1,y,z,r,m,shade=toneI,w=1.1,n=20){
+  const A=on(PX(x0),ellUV(y,z,r,r,n)), B=on(PX(x1),ellUV(y,z,r,r,n));
+  // cap on whichever end faces the viewer (the +x end in VIEW 0)
+  const capB = vis([1,0,0]), cap = capB ? B : A, cn = capB ? [1,0,0] : [-1,0,0];
+  return loft(A,B,nr=>shade(nr,m)) + (vis(cn) ? fill(pd(cap),shade(cn,m)) : '') + hullInk([...A,...B],w) + (vis(cn) ? ink(pd(cap),w*.8) : '');
+}
+// Cylinder between any two 3D points a and b (a lamp arm, a rod, a pipe at an angle, a handle bar), radius r.
+// The end facing the viewer gets a cap. For a tapered part (a cone, a lamp shade) pass r1 for the radius at b.
+function rod(a, b, r, m, shade=toneI, w=1, r1=r, n=16){
+  const d = norm(sub(b, a)), u = norm(cross(d, Math.abs(d[2]) < .9 ? [0,0,1] : [1,0,0])), v = cross(d, u);
+  const ring = (p, rr) => Array.from({length:n}, (_,i) => { const t = i/n*2*Math.PI, c = Math.cos(t)*rr, s2 = Math.sin(t)*rr;
+    return [p[0] + u[0]*c + v[0]*s2, p[1] + u[1]*c + v[1]*s2, p[2] + u[2]*c + v[2]*s2]; });
+  const A = ring(a, r), B = ring(b, r1), capB = vis(d), cap = capB ? B : A, cn = capB ? d : d.map(x => -x);
+  return loft(A, B, nr => shade(nr, m)) + (Math.max(r, r1) > 0 ? fill(pd(cap), shade(cn, m)) + ink(pd(cap), w*.8) : '') + hullInk([...A, ...B], w);
+}
+// Text lying flat on a front plane x = const, centred at (y,z) baseline; reads left-to-right on screen.
+// text sits on a face: if its reading direction comes out mirrored (or edge-on), that face is turned away, so the text is hidden
+const txM = (o, U, V) => (U[0]*V[1] - U[1]*V[0]) <= .02 * Math.hypot(...U) * Math.hypot(...V) ? `matrix(0 0 0 0 ${f(o[0])} ${f(o[1])})` : `matrix(${U[0].toFixed(4)} ${U[1].toFixed(4)} ${V[0].toFixed(4)} ${V[1].toFixed(4)} ${f(o[0])} ${f(o[1])})`;
+const tx = (x,y,z,str,size,col=INK,weight=700) => { const o=P(x,y,z);
+  return `<text transform="${txM(o, Dv(0,-1,0), Dv(0,0,-1))}" font-size="${size}" fill="${col}" text-anchor="middle" font-family="ui-monospace,Menlo,monospace" font-weight="${weight}" letter-spacing=".04em">${str}</text>`; };
+// Text on a side plane y = const, centred at (x,z).
+const txY = (x,y,z,str,size,col=INK,weight=700) => { const o=P(x,y,z);
+  return `<text transform="${txM(o, Dv(1,0,0), Dv(0,0,-1))}" font-size="${size}" fill="${col}" text-anchor="middle" font-family="ui-monospace,Menlo,monospace" font-weight="${weight}" letter-spacing=".04em">${str}</text>`; };
+// Cast shadow of a set of 3D points (any outline of the object), pushed along the light onto z = 0.
+// the light stays put relative to the viewer, so the shadow is cast in turned coordinates
+// z0: the surface it falls on (a board, a counter); clip it to that surface with clipTo(...) if it could spill off.
+// clip: the 3D outline of the surface it falls on (e.g. boardTop(...)), so it can't spill over the edge.
+const castShadow = (pts3, z0=0, clip=null) => { const k = SHADOW_LEN / SHADOW_K, [sx, sy] = yawTurn(SH);
+  const s = fill(sp(hull(pts3.map(([x,y,z]) => P(x+(z-z0)*sx*k, y+(z-z0)*sy*k, z0)))), SHADOW);
+  return clip ? clipTo(clip, s) : s; };
+// A board for the object to stand on (a tray, a desk top, a counter): a rounded slab from (x0,y0) to (x1,y1), h thick.
+// Draw it first; then castShadow(points, h, boardTop(x0,y0,x1,y1,h,r)) so shadows lie on it and stop at its edge.
+const BOARD = { l:'#e6e1d4', m:'#cfc8b8', d:'#aaa293' }, WOOD = { l:'#d9a86c', m:'#bf8a4f', d:'#8e6236' };
+const boardTop = (x0,y0,x1,y1,h=3,r=5) => on(PZ(h), rrUV(x0,y0,x1,y1,r));
+function board(x0,y0,x1,y1,h=3,r=5,m=BOARD){
+  const A = on(PZ(0), rrUV(x0,y0,x1,y1,r)), B = boardTop(x0,y0,x1,y1,h,r);
+  return loft(A, B, n => toneI(n, m)) + fill(pd(B), m.l) + ink(pd(B), 1) + hullInk([...A, ...B], 1.8);
+}
+// Group helpers: clickable target, clip to an opening.
+const act  = (name, inner, data='') => `<g data-act="${name}" ${data}>${inner}</g>`;
+let _clipN = 0;
+// Part label (for "how does it work" figures): a cream pill with a leader line to a 3D point on the part.
+// dx, dy = where the pill sits, in screen units at the reference zoom (they scale with the figure like stroke widths).
+// on = that part is working right now (the pill turns the accent colour). Labels can be hidden with the Labels switch.
+function tag(p3, dx, dy, text, on=false){
+  // on a phone (LBL_U = drawing units per screen px) the pill is a numbered badge and the names go in a legend under the figure
+  const u = window.LBL_U ? LBL_U() : 0, n = ((window.__ln || (window.__ln = {}))[text] || (__ln[text] = Object.keys(__ln).length + 1));
+  const k = INK_K, [X,Y] = P(...p3), fs = u ? 10*u : 8.6*k, h = u ? 17*u : fs*1.8, w = u ? h*(n > 9 ? 1.3 : 1) : text.length*fs*.62 + fs*1.5, cx = X + dx*k, cy = Y + dy*k;
+  return `<g class="tag${on ? ' on' : ''}" data-n="${n}" data-t="${text}"><path d="M${f(X)} ${f(Y)}L${f(cx)} ${f(cy)}" fill="none" stroke="${INK}" stroke-width="1"/>`
+    + `<circle cx="${f(X)}" cy="${f(Y)}" r="${f(1.3*k)}" fill="${INK}"/>`
+    + `<rect x="${f(cx-w/2)}" y="${f(cy-h/2)}" width="${f(w)}" height="${f(h)}" rx="${f(h/2)}" fill="${on ? 'var(--accent,#f4b829)' : '#fff4d6'}" stroke="${INK}" stroke-width="1.2"/>`
+    + `<text x="${f(cx)}" y="${f(cy+fs*.36)}" font-size="${f(fs)}" text-anchor="middle" font-family="ui-monospace,Menlo,monospace" font-weight="800" letter-spacing=".04em" fill="${INK}">${u ? n : text}</text></g>`;
+}
+const clipTo = (pts3, inner) => { const id = 'k' + (++_clipN); return `<clipPath id="${id}"><path d="${pd(pts3)}"/></clipPath><g clip-path="url(#${id})">${inner}</g>`; };
+
+/* ---------- constant on-screen line weight ----------
+   Stroke widths are written in model units, and each figure is zoomed to fill the frame, so a small
+   object would get fat lines. INK_K rescales every stroke-width (and the wobble/grain filter) so all
+   figures match the reference zoom of the booth / vending machine (viewBox ≈ 585 units wide). */
+const INK_REF_VB = 585;
+let INK_K = 1;
+const inkScale = svg => INK_K === 1 ? svg : svg.replace(/stroke-width="([\d.]+)"/g, (_, w) => `stroke-width="${(+w * INK_K).toFixed(2)}"`);
+
+/* ---------- page shell ---------- */
+const CORE_CSS = `
+  :root{--paper:#f2efe7;--ink:#231e16;--muted:#857d6e;--rule:#ddd6c8}
+  *{box-sizing:border-box} html,body{margin:0;height:100%}
+  body{background-color:var(--paper);
+    background-image:url("data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' width='320' height='320'><filter id='p'><feTurbulence type='fractalNoise' baseFrequency='.85' numOctaves='3' stitchTiles='stitch'/><feColorMatrix values='0 0 0 0 .42  0 0 0 0 .39  0 0 0 0 .33  .16 0 0 0 0'/></filter><rect width='100%' height='100%' filter='url(%23p)'/></svg>");
+    overflow-x:hidden;color:var(--ink);font:13px/1.4 ui-monospace,SFMono-Regular,Menlo,monospace;display:flex;flex-direction:column;align-items:center;padding:24px 16px 32px}
+  header{width:100%;max-width:760px;display:flex;justify-content:space-between;align-items:baseline;gap:12px;flex-wrap:wrap}
+  header h1{font-size:13px;font-weight:600;margin:0;letter-spacing:.02em} header span{color:var(--muted)}
+  #fig{width:100%;max-width:760px;height:auto;display:block;margin:4px 0 8px;user-select:none;overflow:visible}
+  #fig{cursor:grab;touch-action:pan-y} #fig.drag{cursor:grabbing} #fig [data-act]{cursor:pointer}
+  #readout, .idea{display:none}   /* status line + big idea are off: the buttons and motion tell the story */
+  .idea{width:100%;max-width:760px;margin:-6px 0 16px;font-size:12.5px;line-height:1.5;text-align:center;color:var(--ink)}
+  .idea strong{letter-spacing:.12em;text-transform:uppercase;font-size:11px;margin-right:8px}
+  #readout{position:relative;min-height:1.4em;letter-spacing:.08em;text-transform:uppercase;margin-bottom:14px;text-align:center;text-shadow:0 0 3px var(--paper),0 0 6px var(--paper),0 0 10px var(--paper)}
+  .stage{position:relative;width:100%;max-width:760px}
+  .actions{position:absolute;top:4px;left:0;display:flex;flex-direction:column;align-items:flex-start;gap:8px;z-index:2;max-width:220px}
+  .actions .cap{color:var(--muted);font-size:11px;letter-spacing:.08em;text-transform:uppercase;margin:0 0 2px}
+  html.nolabels #fig .tag{display:none}
+  .ctl[hidden]{display:none}
+  /* ui.flash(text): a short note under the buttons ("the can is empty — refill it"); the status line itself stays hidden */
+  .toast{position:absolute;left:0;z-index:3;font-size:11.5px;letter-spacing:.06em;text-transform:uppercase;background:var(--paper);
+    border:1.5px solid var(--ink);border-radius:8px;padding:4px 9px;box-shadow:2px 2px 0 var(--ink);opacity:0;transition:opacity .2s;pointer-events:none;max-width:240px}
+  .toast.show{opacity:1}
+  .made-with{width:100%;max-width:760px;margin-top:18px;text-align:right;font-size:11px;letter-spacing:.1em;text-transform:uppercase}
+  .made-with a{color:var(--muted);text-decoration:none} .made-with a:hover{color:var(--ink)}
+  .stats{position:absolute;top:4px;right:0;display:flex;flex-direction:column;align-items:flex-end;gap:10px;z-index:2;text-align:right}
+  .stat .k{font-size:11px;font-weight:700;letter-spacing:.12em;text-transform:uppercase;color:var(--muted)}
+  .stat .v{font-size:34px;font-weight:800;line-height:1.05;letter-spacing:-.01em;font-variant-numeric:tabular-nums;color:var(--ink)}
+  .stat.small .v{font-size:20px}
+  .stat .v.bump{animation:bump .35s ease-out}
+  @keyframes bump{0%{transform:scale(1.18)}100%{transform:none}}
+  .stepwrap{position:relative;display:flex;align-items:center;gap:8px}
+  .act{font:inherit;color:var(--ink);background:var(--paper);border:1.5px solid var(--ink);border-radius:999px;padding:5px 14px;cursor:pointer;white-space:nowrap}
+  .act:hover{background:color-mix(in srgb,var(--paper) 92%,var(--ink))}
+  .act .car{margin-left:6px;font-size:10px}
+  .act:focus-visible{outline:2px solid var(--ink);outline-offset:3px}
+  .chips{display:none;flex-wrap:wrap;gap:6px;background:var(--paper);border:2px solid var(--ink);border-radius:12px;box-shadow:3px 3px 0 var(--ink);
+    padding:8px;width:max-content;max-width:min(300px,62vw);position:absolute;left:calc(100% + 10px);top:-4px;z-index:3}
+  .stepwrap.open .chips{display:flex}
+  .chip{white-space:nowrap;font:inherit;font-size:11.5px;font-weight:700;color:var(--ink);background:var(--paper);border:1.5px solid var(--ink);border-radius:8px;padding:4px 8px;cursor:pointer;box-shadow:2px 2px 0 var(--ink)}
+  .chip:hover{background:var(--accent,#f4b829);transform:translate(-1px,-1px)}
+  .chip.current{background:var(--ink);color:var(--paper)} .chip.current:hover{background:var(--ink);transform:none}
+  .chip.off{opacity:.45} .chip.off:hover{transform:none;background:var(--paper)}
+
+  @media (max-width:560px){body{padding:14px 12px 24px}header span,.actions .cap{display:none}.actions{flex-direction:row;flex-wrap:wrap;gap:6px}.act{font-size:12px;padding:4px 11px}.stats{position:static;flex-direction:row;justify-content:flex-end;gap:18px;margin-bottom:4px}.actions{position:static;max-width:none;margin:6px 0 4px}.chips{left:0;top:calc(100% + 8px)}}
+  .controls{width:100%;max-width:760px;display:grid;grid-template-columns:repeat(auto-fit,minmax(200px,1fr));gap:14px 28px;border-top:1px solid var(--rule);padding-top:16px}
+  .ctl{display:flex;flex-direction:column;gap:6px}
+  .ctl label{color:var(--muted);font-size:11px;letter-spacing:.08em;text-transform:uppercase}
+  input[type=range]{width:100%;accent-color:var(--ink)}
+  .row{display:flex;gap:8px;flex-wrap:wrap}
+  button{font:inherit;color:var(--ink);background:transparent;border:1.5px solid var(--ink);border-radius:999px;padding:5px 14px;cursor:pointer}
+  button:hover{background:#0000000d}
+  button[aria-pressed=true]:not(.sw){background:var(--ink);color:var(--paper)}
+  .sw{width:26px;height:26px;padding:0;border-radius:50%} .sw[aria-pressed=true]{outline:2px solid var(--ink);outline-offset:2px}`;
+
+const filterFor = k => `<filter id="hand" x="-3%" y="-3%" width="106%" height="106%" color-interpolation-filters="sRGB">
+  <feTurbulence type="fractalNoise" baseFrequency="${(0.045/k).toFixed(4)}" numOctaves="2" seed="4" result="warp"/>
+  <feDisplacementMap id="wob" in="SourceGraphic" in2="warp" scale="${(2.4*k).toFixed(2)}" xChannelSelector="R" yChannelSelector="G" result="wob"/>
+  <feTurbulence type="fractalNoise" baseFrequency="${(0.9/k).toFixed(4)}" numOctaves="3" seed="11" result="n1"/>
+  <feColorMatrix in="n1" type="matrix" values=".3 0 0 0 .84  .3 0 0 0 .84  .3 0 0 0 .84  0 0 0 0 1" result="grain"/>
+  <feTurbulence type="fractalNoise" baseFrequency="${(0.012/k).toFixed(4)}" numOctaves="2" seed="7" result="n2"/>
+  <feColorMatrix in="n2" type="matrix" values=".3 0 0 0 .85  .3 0 0 0 .85  .3 0 0 0 .85  0 0 0 0 1" result="blot"/>
+  <feBlend in="wob" in2="grain" mode="multiply" result="g1"/><feBlend in="g1" in2="blot" mode="multiply" result="g2"/>
+  <feComposite in="g2" in2="wob" operator="in"/></filter>`;
+
+/* mountFigure({
+     fig:'03', title:'Photo booth', hint:'click the curtain…',
+     size:[W,D,H],                 // bounding box, used to frame the view (shadow range included)
+     palette:'mustard',            // default PALS key
+     state:{...},                  // figure state (st.pal is built in)
+     scene: (st, m) => svgString,  // m = current palette {l,m,d}
+     readout: st => 'text',        // status line under the figure
+     buttons: [{label, onClick(st, ui)}      // listed in the order the user should do them
+               | {label, choices: st => [{label, onClick(st,ui), current?, disabled?, why?}]}],   // opens a picker
+     stats: st => [{label, value, small?}],   // optional: big numbers top-right (credit, change, score)
+     credit: false,                // optional: hide the small "Made with Colorfigures" link
+     acts: { name(st, el, ui){} },  // clicks on act(name, …) groups; el has dataset
+     params(st, q){}               // optional: read URLSearchParams for screenshot states
+   })  -> ui = { st, render, animate(stepFn), flash(text,ms) }
+   animate(step): calls step(dt seconds) every frame and re-renders until step returns false. */
+addEventListener('error', e => { document.documentElement.dataset.errors = (document.documentElement.dataset.errors || '') + ' ' + e.message + ';'; });
+/* The hand-drawn filter's noise never changes, but browsers recompute every feTurbulence each time the drawing changes
+   (on phones SVG filters run on the CPU, so this is most of the cost of a frame). bakeNoise renders each noise layer once
+   into an image and swaps it in: coarse layers as one small image over the whole view (they are smooth, so scaling up
+   is invisible), fine grain as a seamless tile. If anything fails (an old browser), the live filter simply stays. */
+function bakeNoise(svg){
+  const fl = document.getElementById('hand'); if (!fl || typeof Image === 'undefined') return;
+  const NS = 'http://www.w3.org/2000/svg', vb = svg.viewBox.baseVal;
+  const x0 = vb.x - vb.width*.35, y0 = vb.y - vb.height*.35, w0 = vb.width*1.7, h0 = vb.height*1.7;
+  for (const t of [...fl.querySelectorAll('feTurbulence')]){
+    const fq = parseFloat(t.getAttribute('baseFrequency')), oct = +(t.getAttribute('numOctaves') || 1);
+    if (!(fq > 0)) continue;
+    const fine = fq * Math.max(w0, h0) > 80;
+    if (fine) continue;   // fine grain stays live: a repeated tile leaves faint seams on some GPUs
+    const rx = fine ? 0 : x0, ry = fine ? 0 : y0, rw = fine ? 48 / fq : w0, rh = fine ? 48 / fq : h0;
+    const ppu = fq * (fine ? 7 : 5) * Math.pow(2, Math.max(0, oct - 1) * .5), PW = Math.ceil(rw * ppu), PH = Math.ceil(rh * ppu);
+    if (PW * PH > 1200 * 1200) continue;
+    const tb = t.cloneNode(); tb.removeAttribute('result'); if (fine) tb.setAttribute('stitchTiles', 'stitch');
+    const src = `<svg xmlns="${NS}" width="${PW}" height="${PH}" viewBox="${rx} ${ry} ${rw} ${rh}"><filter id="n" filterUnits="userSpaceOnUse" x="${rx}" y="${ry}" width="${rw}" height="${rh}" color-interpolation-filters="sRGB">${tb.outerHTML}</filter><rect x="${rx}" y="${ry}" width="${rw}" height="${rh}" filter="url(#n)"/></svg>`;
+    const img = new Image();
+    img.onload = () => { try {
+      const c = document.createElement('canvas'); c.width = PW; c.height = PH; const g = c.getContext('2d'); g.drawImage(img, 0, 0);
+      // store the noise's colour values fully opaque: the filter reads its colour channels, and an image with
+      // see-through pixels would be read premultiplied (darker) by some browsers
+      const px = g.getImageData(0, 0, PW, PH); for (let i = 3; i < px.data.length; i += 4) px.data[i] = 255; g.putImageData(px, 0, 0);
+      const url = c.toDataURL('image/png'), res = t.getAttribute('result');
+      const im = document.createElementNS(NS, 'feImage');
+      // a tile must sit inside the filter's region (the drawing's box) or it gets clipped: anchor it at the drawing's
+      // centre, snapped to whole tiles so the grain keeps the same phase as the live noise would
+      let ox = rx, oy = ry;
+      if (fine){ const bb = svg.getElementById ? document.getElementById('art').getBBox() : { x: 0, y: 0, width: 0, height: 0 };
+        ox = Math.floor((bb.x + bb.width/2) / rw) * rw; oy = Math.floor((bb.y + bb.height/2) / rh) * rh; }
+      for (const [k, v] of [['x', ox], ['y', oy], ['width', rw], ['height', rh], ['preserveAspectRatio', 'none']]) im.setAttribute(k, v);
+      im.setAttribute('href', url); im.setAttributeNS('http://www.w3.org/1999/xlink', 'xlink:href', url);
+      if (!t.isConnected) return;
+      if (fine){ im.setAttribute('result', res + '_tile'); const tl = document.createElementNS(NS, 'feTile'); tl.setAttribute('in', res + '_tile'); tl.setAttribute('result', res); t.replaceWith(im, tl); }
+      else { im.setAttribute('result', res); t.replaceWith(im); }
+    } catch (e) {} };
+    img.src = 'data:image/svg+xml;charset=utf-8,' + encodeURIComponent(src);
+  }
+}
+function mountFigure(cfg){
+  document.title = cfg.title;
+  const style = document.createElement('style'); style.textContent = CORE_CSS; document.head.appendChild(style);
+  document.body.innerHTML = `
+    <header><h1>Fig. ${cfg.fig} — ${cfg.title}</h1></header>
+    <div class="stage">
+      ${cfg.buttons && cfg.buttons.length ? `<div class="actions" id="btns"></div>` : ''}
+      ${cfg.stats ? '<div class="stats" id="stats"></div>' : ''}
+      <div class="toast" id="toast" role="status"></div>
+      <svg id="fig" role="img" aria-label="${cfg.title}"><defs id="fdefs"></defs><g id="art" filter="url(#hand)"></g></svg>
+    </div>
+    <div id="readout"></div>
+    ${cfg.idea ? `<p class="idea"><strong>The big idea</strong>${cfg.idea}</p>` : ''}
+    <div class="controls">
+      <div class="ctl"><label for="wb">Hand-drawn wobble</label><input id="wb" type="range" min="0" max="7" step="0.1" value="2.4"></div>
+      <div class="ctl"><label>Colour</label><div class="row" id="pals"></div></div>
+      <div class="ctl"><label>View</label><div class="row"><button id="vreset">Front view</button><button id="vspin" aria-pressed="false">Turntable</button></div></div>
+      <div class="ctl" id="lblctl" hidden><label>Labels</label><div class="row"><button id="lbl" aria-pressed="true">On</button></div></div>
+    </div>
+    ${cfg.credit === false ? '' : '<footer class="made-with"><a href="https://april-zhu.com/colorfigures" target="_blank" rel="noopener">Made with Colorfigures ↗</a></footer>'}`;
+  const st = cfg.state || {};            // kept as the same object, so a figure may hold on to it
+  if (!st.pal) st.pal = cfg.palette || 'mustard';
+  if (st.az == null) st.az = 105;
+  const q = new URLSearchParams(location.search);
+  // a figure turns all the way round only once it has been checked from every side (turn:'full'); otherwise it turns
+  // +-60 deg around the front, where it was drawn. ?free=1 unlocks it for testing.
+  CAM_LIM = cfg.turn === 'full' || q.get('free') === '1' ? null : 60;
+  if (PALS[q.get('pal')]) st.pal = q.get('pal');
+  if (cfg.params) cfg.params(st, q);
+
+  // frame on the object itself: centred, filling ~60% of the width / ~78% of the height of a 4:3 view.
+  // The cast shadow is allowed to spill outside the frame (svg overflow is visible).
+  const [W,D,H] = cfg.size, pts = [];
+  OX = OY = 0; RC = cfg.center || [W/2, D/2]; RCZ = H/2;
+  VIEW = 0; setCam(YAW0, PITCH0);
+  for (const x of [0,W]) for (const y of [0,D]) for (const z of [0,H]) pts.push(P(x,y,z));
+  const xs=pts.map(p=>p[0]), ys=pts.map(p=>p[1]);
+  const bw = Math.max(...xs)-Math.min(...xs), bh = Math.max(...ys)-Math.min(...ys);
+  // the object fills ~74% of the width / ~88% of the height, nudged right of centre so the buttons (top left) stay clear
+  // on a phone (FIG_A, from the gallery) the frame grows taller than 4:3, as far as the object needs, so tall machines fill it;
+  // the spare height goes mostly below; the object stays centred (its shadow may run off the edge, by the owner's call)
+  const PA = window.FIG_A ? FIG_A() : .75, A = PA === .75 ? .75 : Math.min(PA, Math.max(.75, bh/.88/(bw/.74)*1.08)), vbW = Math.max(bw/.74, bh/.88/A), vbH = vbW*A;
+  OX = (vbW-bw)/2 + (PA === .75 ? vbW*.06 : 0) - Math.min(...xs); OY = (PA === .75 ? vbH*.04 : (vbH - bh)*.3) - Math.min(...ys);   // sit a little high: shadows fall downward
+  const svg = document.getElementById('fig');
+  svg.setAttribute('viewBox', `0 0 ${f(vbW)} ${f(vbH)}`);
+  INK_K = vbW / INK_REF_VB;
+  document.getElementById('fdefs').innerHTML = filterFor(INK_K);
+  bakeNoise(svg);
+
+  const art = document.getElementById('art'), readout = document.getElementById('readout');
+  const ui = { st };
+  ui.render = () => { _clipN = 0; document.documentElement.style.setProperty('--accent', PALS[st.pal].l); art.innerHTML = inkScale(cfg.scene(st, PALS[st.pal])); if (!ui._flash) readout.textContent = cfg.readout ? cfg.readout(st) : ''; if (ui.drawStats) ui.drawStats(); };
+  // big numbers in the top-right corner (credit, change, score…); a value that changes gets a little bump
+  const statsEl = document.getElementById('stats'), prevStats = {};
+  ui.drawStats = () => { if (!statsEl) return;
+    const list = cfg.stats(st).filter(Boolean), html = list.map(x => `<div class="stat${x.small ? ' small' : ''}"><div class="k">${x.label}</div><div class="v" data-k="${x.label}">${x.value}</div></div>`).join('');
+    if (statsEl._html !== html){ statsEl._html = html; statsEl.innerHTML = html;
+      statsEl.querySelectorAll('.v').forEach(v => { if (prevStats[v.dataset.k] != null && prevStats[v.dataset.k] !== v.textContent) v.classList.add('bump'); prevStats[v.dataset.k] = v.textContent; }); } };
+  let flashT = 0;
+  const toast = document.getElementById('toast');
+  ui.flash = (text, ms=1600) => { ui._flash = true; readout.textContent = text; toast.textContent = text;
+    toast.style.top = ((document.getElementById('btns') ? document.getElementById('btns').offsetTop + document.getElementById('btns').offsetHeight : 0) + 8) + 'px'; toast.classList.add('show');
+    clearTimeout(flashT); flashT = setTimeout(() => { ui._flash = false; toast.classList.remove('show'); ui.render(); }, ms); };
+  // One frame driver for every running animation: each frame runs all the steps, then draws once (two animations at
+  // the same time no longer draw twice). It follows the screen's frames, with a timer fallback for when frames don't
+  // come (headless shots, a hidden tab). ui.invalidate() asks for one redraw on the next frame (used while dragging).
+  const steps = new Set(); let driving = false, lastT = 0, fbT = 0;
+  const frame = () => { if (!driving) return; driving = false; clearTimeout(fbT);
+    const now = performance.now(), dt = Math.max(0, Math.min(.05, (now - lastT) / 1000)); lastT = now;
+    for (const s of [...steps]) if (s(dt) === false) steps.delete(s);
+    ui.render(); if (steps.size) drive(); };
+  const drive = () => { if (driving) return; driving = true; requestAnimationFrame(frame); fbT = setTimeout(frame, 60); };
+  ui.animate = step => { if (!steps.size && !driving) lastT = performance.now(); steps.add(step); drive(); };
+  ui.invalidate = () => drive();
+
+  // clickable parts react on press, not on click: while something animates, the scene is redrawn every frame, so the
+  // element under the pointer is replaced between press and release and a 'click' would never fire
+  svg.addEventListener('pointerdown', e => { if (e.button) return; const a = e.target.closest('[data-act]'); if (!a || !cfg.acts || !cfg.acts[a.dataset.act]) return;
+    e.preventDefault(); cfg.acts[a.dataset.act](st, a, ui); ui.render(); });
+  // orbit: drag anywhere that is not a clickable part (the machine turns the way the finger moves); arrow keys nudge; double-click eases back to the front view
+  let drag = null, spin = false, camAnim = 0;
+  const camTo = (y, p, ms=700) => { const y0 = YAW, p0 = PITCH, dy = ((y - y0 + 540) % 360) - 180, id = ++camAnim; let t = 0;
+    ui.animate(dt => { if (id !== camAnim) return false; t += dt*1000; const k = Math.min(1, t / ms), e = ease(k); setCam(y0 + dy*e, p0 + (p - p0)*e); return k < 1; }); };
+  ui.camTo = camTo;
+  svg.addEventListener('pointerdown', e => { if (e.button || e.target.closest('[data-act]')) return;
+    camAnim++; drag = { x:e.clientX, y:e.clientY, yaw:YAW, pitch:PITCH }; svg.classList.add("drag"); try { svg.setPointerCapture(e.pointerId); } catch {} });
+  svg.addEventListener('pointermove', e => { if (!drag) return; const k = 300 / svg.getBoundingClientRect().width;
+    setCam(drag.yaw + (e.clientX - drag.x)*.55*k, drag.pitch + (e.clientY - drag.y)*.35*k); ui.invalidate(); });
+  const endDrag = () => { drag = null; svg.classList.remove('drag'); };
+  svg.addEventListener('pointerup', endDrag); svg.addEventListener('pointercancel', endDrag);
+  svg.addEventListener('dblclick', e => { if (!e.target.closest('[data-act]')) camTo(YAW0, PITCH0); });
+  addEventListener('keydown', e => { const k = { ArrowLeft:[-15,0], ArrowRight:[15,0], ArrowUp:[0,8], ArrowDown:[0,-8] }[e.key];
+    if (!k || window.GAME_KEYS || /input|textarea/i.test(e.target.tagName)) return; e.preventDefault(); camTo(YAW + k[0], PITCH + k[1], 260); });   // a game figure keeps the arrows for play
+  document.getElementById('vreset').onclick = () => { spin = false; vsp.setAttribute('aria-pressed', false); camTo(YAW0, PITCH0); };
+  const vsp = document.getElementById('vspin');
+  vsp.onclick = () => { spin = !spin; vsp.setAttribute('aria-pressed', spin); camAnim++;
+    let dir = 1;   // with a turning limit, the turntable swings back and forth inside it
+    if (spin) ui.animate(dt => { if (!spin) return false; if (!drag){ let y = YAW + dir*dt*18;
+      if (CAM_LIM != null && Math.abs(y - YAW0) >= CAM_LIM - .5){ dir = -dir; y = YAW + dir*dt*18; } setCam(y, PITCH); } return true; }); };
+  if (q.has('yaw') || q.has('pitch')) setCam(+(q.get('yaw') ?? YAW0), +(q.get('pitch') ?? PITCH0));
+  const btns = document.getElementById('btns');
+  const stepEls = [];
+  if (btns) cfg.buttons.forEach((b, i) => {
+    const wrap = document.createElement('div'); wrap.className = 'stepwrap';
+    const el = document.createElement('button'); el.className = 'act';
+    el.innerHTML = `${b.label}${b.choices ? '<span class="car">▾</span>' : ''}`;
+    wrap.appendChild(el); btns.appendChild(wrap); stepEls.push(el);
+    if (!b.choices){ el.onclick = () => { closeChips(); b.onClick(st, ui); ui.render(); }; return; }
+    const chips = document.createElement('div'); chips.className = 'chips'; wrap.appendChild(chips);
+    el.onclick = e => { e.stopPropagation(); const open = !wrap.classList.contains('open'); closeChips();
+      if (!open) return;
+      chips.innerHTML = '';
+      // every choice stays clickable, so nothing silently ignores a press:
+      //   current:true  = the one in use (shown selected); a press just says so
+      //   disabled:true = not possible right now (shown faded); a press says why (c.why, or a generic note)
+      for (const c of b.choices(st)){ const ch = document.createElement('button'); ch.className = 'chip' + (c.current ? ' current' : c.disabled ? ' off' : ''); ch.textContent = c.label;
+        if (c.current) ch.setAttribute('aria-pressed', 'true');
+        ch.onclick = ev => { ev.stopPropagation(); closeChips();
+          if (c.current) return ui.flash(`${c.label} — already set`);
+          if (c.disabled) return ui.flash(c.why || `${c.label} isn't possible right now`);
+          c.onClick(st, ui); ui.render(); }; chips.appendChild(ch); }
+      wrap.classList.add('open'); };
+  });
+  function closeChips(){ document.querySelectorAll('.stepwrap.open').forEach(w => w.classList.remove('open')); }
+  document.addEventListener('click', closeChips);
+
+  document.getElementById('wb').oninput = e => document.getElementById('wob').setAttribute('scale', (e.target.value * INK_K).toFixed(2));
+  const pals = document.getElementById('pals');
+  for (const [k,p] of Object.entries(PALS)){
+    const b = document.createElement('button'); b.className='sw'; b.title=k; b.style.background=p.l; b.setAttribute('aria-pressed', k===st.pal);
+    b.onclick = () => { st.pal=k; [...pals.children].forEach(c=>c.setAttribute('aria-pressed', c===b)); ui.render(); };
+    pals.appendChild(b);
+  }
+  // labels: the switch appears when the figure draws any tag(); ?labels=0 starts with them hidden
+  const lblctl = document.getElementById('lblctl'), lbl = document.getElementById('lbl');
+  const setLabels = on => { document.documentElement.classList.toggle('nolabels', !on); lbl.textContent = on ? 'On' : 'Off'; lbl.setAttribute('aria-pressed', on); };
+  lbl.onclick = () => setLabels(document.documentElement.classList.contains('nolabels'));
+  if (q.get('labels') === '0') setLabels(false);
+  // testing: ?press=Label@ms,Label@ms clicks the buttons whose text starts with Label at those times after load
+  // (any order, repeats allowed); Label>Choice picks a choice from a picker button (?press=Speed>3@300).
+  // Script errors and unknown labels are recorded on <html data-errors="…">
+  window.__st = st;
+  const noteErr = m => { document.documentElement.dataset.errors = (document.documentElement.dataset.errors || '') + ' ' + m + ';'; };
+  const starts = (el, t) => el.textContent.trim().toLowerCase().startsWith(t.trim().toLowerCase());
+  if (q.has('press')) q.get('press').split(',').forEach(item => { const [what, ms] = item.split('@'), [label, choice] = what.split('>');
+    setTimeout(() => { const b = [...document.querySelectorAll('.act')].find(b => starts(b, label));
+      if (!b) return noteErr(`no button "${label}"`);
+      b.click(); if (choice == null) return;
+      const c = [...b.parentElement.querySelectorAll('.chip')].find(c => starts(c, choice));
+      if (c && !c.disabled) c.click(); else noteErr(`no choice "${choice}" in "${label}"`); }, +ms || 0); });
+  setLight(st.az); ui.render();
+  if (art.querySelector('.tag')) lblctl.hidden = false;
+  return ui;
+}
+
+/* ---------- see-through + labels kit (shared; the figure supplies its own working parts) ----------
+   xrCallouts(items, B): pills in two columns either side of the object, sorted top to bottom so leaders never cross.
+     items: [{ at:[x,y,z], text, on }], B: the object's bounds [x0, x1, y0, y1, z0, z1].
+   xrGhost(body, mech, k, OUTp, x0, x1, m): far walls faintly, the working parts, then the case as a ghost over them.
+   xrMount(getUI, caption): the See-through / Labels switches (top right), the caption under the figure, label hiding. */
+function xrCallouts(items, B){
+  const pts = []; for (const x of [B[0], B[1]]) for (const y of [B[2], B[3]]) for (const z of [B[4], B[5]]) pts.push(P(x, y, z));
+  const xmin = Math.min(...pts.map(p => p[0])), xmax = Math.max(...pts.map(p => p[0])), cx = (xmin + xmax)/2;
+  // on a phone (LBL_U = drawing units per screen px) each label is a numbered badge and the names go in a legend under the figure
+  const k = INK_K, u = window.LBL_U ? LBL_U() : 0, fs = u ? 10*u : 8.6*k, hgt = u ? 17*u : fs*1.8, gap = hgt + (u ? 3*u : 3*k);
+  const L = [], R = [];
+  const svgEl = document.getElementById('fig'), vb = svgEl.viewBox.baseVal, btn = document.getElementById('btns');
+  const wMax = u ? hgt*1.3 + 12*k : Math.max(...items.map(it => it.text.length))*fs*.62 + fs*1.5 + 12*k;
+  const roomL = xmin - vb.x >= wMax, roomR = vb.x + vb.width - xmax >= wMax;
+  for (const it of items){ const [X, Y] = P(...it.at); ((X < cx && roomL) || !roomR ? L : R).push({ ...it, X, Y }); }
+  let s = '';
+  let top = { [-1]: fs, [1]: fs + 30*k };
+  if (btn && svgEl.getScreenCTM()){ const r = btn.getBoundingClientRect(), q = new DOMPoint(r.right, r.bottom + 50).matrixTransform(svgEl.getScreenCTM().inverse());
+    if (q.y > 0) top[-1] = q.y + hgt; }
+  for (const [col, side] of [[L, -1], [R, 1]]){
+    col.sort((a, b) => a.Y - b.Y);
+    let y = -1e9; for (const c of col){ c.py = Math.max(c.Y, y + gap, top[side]); y = c.py; }
+    const shift = col.length ? Math.max(0, col.reduce((a, c) => a + c.py - c.Y, 0) / col.length) : 0;
+    const room = col.length ? col[0].py - top[side] : 0; for (const c of col) c.py -= Math.min(shift, room);
+    for (const c of col){
+      c.n = ((window.__ln || (window.__ln = {}))[c.text] || (__ln[c.text] = Object.keys(__ln).length + 1)); const w = u ? hgt*(c.n > 9 ? 1.3 : 1) : c.text.length*fs*.62 + fs*1.5;
+      let px = side < 0 ? xmin - 10*k - w/2 : xmax + 10*k + w/2; px = Math.max(vb.x + w/2 + 2*k, Math.min(vb.x + vb.width - w/2 - 2*k, px));
+      const ex = px - side*w/2;
+      s += `<g class="tag${c.on ? ' on' : ''}" data-n="${c.n}" data-t="${c.text}"><path d="M${f(c.X)} ${f(c.Y)}L${f(ex + side*-4*k)} ${f(c.py)}L${f(ex)} ${f(c.py)}" fill="none" stroke="${INK}" stroke-width="1"/>`
+        + `<circle cx="${f(c.X)}" cy="${f(c.Y)}" r="${f(1.4*k)}" fill="${INK}"/>`
+        + `<rect x="${f(px - w/2)}" y="${f(c.py - hgt/2)}" width="${f(w)}" height="${f(hgt)}" rx="${f(hgt/2)}" fill="${c.on ? 'var(--accent,#f4b829)' : '#fff4d6'}" stroke="${INK}" stroke-width="1.2"/>`
+        + `<text x="${f(px)}" y="${f(c.py + fs*.36)}" font-size="${f(fs)}" text-anchor="middle" font-family="ui-monospace,Menlo,monospace" font-weight="800" letter-spacing=".04em" fill="${INK}">${u ? c.n : c.text}</text></g>`;
+    }
+  }
+  return s;
+}
+function xrGhost(body, mech, k, OUTp, x0, x1, m){
+  const fF = facing([1,0,0]), fB = facing([-1,0,0]);
+  const far = `<g opacity="${f(.5*k)}">` + loft(on(PX(x0), OUTp), on(PX(x1), OUTp), n => mix(toneI(n.map(v => -v), m), '#f2efe7', .55), true)
+    + (fF ? fill(pd(on(PX(x0), OUTp)), mix(m.d, '#f2efe7', .5)) : '') + (fB ? fill(pd(on(PX(x1), OUTp)), mix(m.d, '#f2efe7', .5)) : '') + `</g>`;
+  return far + mech + `<g opacity="${f(1 - .8*k)}">${body}</g>` + `<g opacity="${f(.6*k)}">` + hullInk([...on(PX(x0), OUTp), ...on(PX(x1), OUTp)], 2.8) + `</g>`;
+}
+function xrMount(getUI, caption, opt = {}){   // opt.labelsOnly: only the Labels switch (the insides are on show already)
+  const ui = getUI(), q = new URLSearchParams(location.search), html = document.documentElement;
+  if (q.get('labels') !== '1') html.classList.add('nolabels');
+  if (ui.st.xr == null){ ui.st.xr = 0; ui.st.xrT = 0; }
+  if (q.get('xr') === '1') ui.st.xr = ui.st.xrT = 1;
+  const old = document.getElementById('lblctl'); if (old) old.style.display = 'none';
+  const vset = document.createElement('div'); vset.className = 'vset';
+  vset.innerHTML = '<div class="vrow">' + (opt.labelsOnly ? '' : '<button class="act" id="xrb" aria-pressed="false">See-through</button>') + '<button class="act" id="lblb" aria-pressed="false">Labels</button></div>';
+  document.querySelector('.stage').appendChild(vset);
+  // pages with a stats panel in the top right: the switches go just under it
+  const place = () => { const sp = document.getElementById('stats'); vset.style.top = sp ? (sp.offsetTop + sp.offsetHeight + 10) + 'px' : ''; };
+  place(); new ResizeObserver(place).observe(document.getElementById('stats') || vset);
+  const xrb = document.getElementById('xrb'), lblb = document.getElementById('lblb');
+  const sync = () => { if (xrb) xrb.setAttribute('aria-pressed', !!getUI().st.xrT); lblb.setAttribute('aria-pressed', !html.classList.contains('nolabels')); };
+  if (xrb) xrb.onclick = () => { const u = getUI(), st = u.st; st.xr = st.xr || 0; st.xrT = st.xrT ? 0 : 1; sync();
+    u.animate(dt => { const g = Math.sign(st.xrT - st.xr); st.xr = Math.min(1, Math.max(0, st.xr + g*dt/.7)); return st.xr !== st.xrT; }); };
+  lblb.onclick = () => { html.classList.toggle('nolabels'); sync(); };
+  sync();
+  const cap = document.createElement('p'); cap.className = 'mcap'; document.querySelector('.stage').after(cap);
+  const css = document.createElement('style');
+  css.textContent = '.vset{position:absolute;top:4px;right:0;z-index:2}.vrow{display:flex;gap:6px}.vset .act[aria-pressed=true]{background:var(--ink);color:var(--paper)}'
+    + 'html.nolabels #fig .tag{display:none}.mcap{width:100%;max-width:760px;min-height:3em;margin:0 0 14px;font-size:12.5px;line-height:1.5;text-align:center;transition:opacity .3s}'
+    + '@media (max-width:560px){.vset{position:static;margin:4px 0}}';
+  document.head.appendChild(css);
+  const r0 = ui.render; ui.render = () => { r0(); const st = getUI().st; cap.style.opacity = st.xr > .5 ? 1 : 0; cap.textContent = caption(st); };
+  ui.render();
+}
+// same, for a body lofted between two horizontal rings A (bottom) and B (top)
+function xrGhostRings(body, mech, k, A, B, m){
+  const far = `<g opacity="${f(.5*k)}">` + loft(A, B, n => mix(toneI(n.map(v => -v), m), '#f2efe7', .55), true) + fill(pd(A), mix(m.d, '#f2efe7', .5)) + `</g>`;
+  return far + mech + `<g opacity="${f(1 - .8*k)}">${body}</g>` + `<g opacity="${f(.6*k)}">` + hullInk([...A, ...B], 2.8) + `</g>`;
+}
+// generic see-through for any figure: the whole drawing fades back and the inside parts show over it.
+//   opts: { mech(st, k) -> svg, inside(st) -> label items, surface(st) -> label items (optional), B: bounds, getSt() }
+// washer-style ghost for an object without a single box case: its inside parts first, then the object pale over them
+const xrUnder = (svg, mech, k) => `<g opacity="${f(k)}">${mech}</g><g opacity="${f(1 - .62*k)}">${svg}</g>`;
+function xrWrap(sceneFn, opts){
+  return function(){
+    let s = sceneFn.apply(this, arguments);
+    const st = opts.getSt(), k = ease(st.xr || 0);
+    if (k > 0 && opts.under) s = xrUnder(s, opts.mech(st, k), k);   // the whole drawing is the object
+    else if (k > 0 && !opts.inline) s = `<g opacity="${f(1 - .5*k)}">${s}</g><g opacity="${f(k)}">${opts.mech(st, k)}</g>`;   // inline: the figure ghosts its own case
+    const items = k > .6 ? opts.inside(st) : opts.surface ? opts.surface(st) : [];
+    return s + (items.length ? xrCallouts(items, opts.B) : '');
+  };
+}
+
+/* ---------- game keypad: mountKeypad({ rows, hub:[col,row], action:'DROP', keys:[{ key:'ArrowLeft', glyph:'\u25c0', name, at:[col,row] }] })
+   An inked pad under the buttons that sends the same keyboard events as the arrows and space (set window.GAME_KEYS = true
+   so the arrows play instead of turning the camera). ---------- */
+function mountKeypad(spec){
+  const host = document.getElementById('btns'); if (!host) return;
+  const css = document.createElement('style');
+  css.textContent = `.kpad{display:flex;align-items:center;gap:16px;margin-top:6px;padding:10px 12px;border:1.5px solid var(--ink);border-radius:14px;
+      background:var(--paper);box-shadow:0 3px 0 var(--ink);touch-action:none;user-select:none;-webkit-user-select:none}
+    .kpad .dp{display:grid;grid-template-columns:repeat(3,34px);grid-template-rows:repeat(var(--rows),34px);gap:3px}
+    .kpad .k{all:unset;box-sizing:border-box;display:flex;align-items:center;justify-content:center;width:34px;height:34px;cursor:pointer;
+      background:#fbf7ea;border:1.5px solid var(--ink);border-radius:7px;box-shadow:0 3px 0 var(--ink);color:var(--ink);font:700 13px ui-monospace,Menlo,monospace;
+      transition:transform .05s,box-shadow .05s,background .05s}
+    .kpad .hub{width:34px;height:34px;display:flex;align-items:center;justify-content:center}
+    .kpad .hub i{width:12px;height:12px;border-radius:50%;border:1.5px solid var(--ink);background:#e6e0d1}
+    .kpad .go{all:unset;box-sizing:border-box;width:62px;height:62px;border-radius:50%;cursor:pointer;display:flex;flex-direction:column;align-items:center;justify-content:center;
+      background:#e2483d;border:1.5px solid var(--ink);box-shadow:0 4px 0 var(--ink),inset 0 -5px 0 rgba(0,0,0,.18);color:#fff;font:800 12px ui-monospace,Menlo,monospace;letter-spacing:.06em;
+      transition:transform .05s,box-shadow .05s}
+    .kpad .go small{font:700 8px ui-monospace,Menlo,monospace;opacity:.85;letter-spacing:.08em;margin-top:2px}
+    .kpad .down{transform:translateY(2px);box-shadow:0 1px 0 var(--ink)}
+    .kpad .k.down{background:var(--accent,#f4b829)}
+    .kpad .go.down{transform:translateY(3px);box-shadow:0 1px 0 var(--ink),inset 0 -3px 0 rgba(0,0,0,.18)}
+    @media (max-width:560px){.kpad{gap:22px;padding:10px 16px}.kpad .dp{grid-template-columns:repeat(3,44px);grid-template-rows:repeat(var(--rows),44px)}
+      .kpad .k,.kpad .hub{width:44px;height:44px;font-size:15px}.kpad .go{width:74px;height:74px}}`;
+  document.head.appendChild(css);
+  const pad = document.createElement('div'); pad.className = 'kpad'; pad.setAttribute('role', 'group'); pad.setAttribute('aria-label', 'Keypad');
+  const dp = document.createElement('div'); dp.className = 'dp'; dp.style.setProperty('--rows', spec.rows);
+  const els = {};
+  for (const k of spec.keys){
+    const b = document.createElement('button'); b.className = 'k'; b.textContent = k.glyph; b.setAttribute('aria-label', k.name);
+    b.style.gridColumn = k.at[0] + 1; b.style.gridRow = k.at[1] + 1; dp.appendChild(b); els[k.key] = b; }
+  if (spec.hub){ const h = document.createElement('div'); h.className = 'hub'; h.innerHTML = '<i></i>'; h.style.gridColumn = spec.hub[0] + 1; h.style.gridRow = spec.hub[1] + 1; dp.appendChild(h); }
+  const go = document.createElement('button'); go.className = 'go'; go.innerHTML = `${spec.action}<small>SPACE</small>`; go.setAttribute('aria-label', spec.action);
+  els[' '] = go;
+  pad.append(dp, go); host.appendChild(pad);
+  const send = (type, key) => dispatchEvent(new KeyboardEvent(type, { key, bubbles: true }));
+  for (const [key, el] of Object.entries(els)){
+    let held = null;
+    el.addEventListener('pointerdown', e => { e.preventDefault(); e.stopPropagation(); if (held != null) return; held = e.pointerId;
+      try { el.setPointerCapture(e.pointerId); } catch (_) {} send('keydown', key); });
+    const release = e => { if (held == null || (e && e.pointerId !== held)) return; held = null; send('keyup', key); };
+    el.addEventListener('pointerup', release); el.addEventListener('pointercancel', release); el.addEventListener('lostpointercapture', release);
+    el.addEventListener('click', e => e.preventDefault());
+    el.addEventListener('keydown', e => { if (e.key === 'Enter'){ e.preventDefault(); send('keydown', key); setTimeout(() => send('keyup', key), 120); } });
+  }
+  // space belongs to the game: a button that still has the focus from a click must not be pressed by it too
+  addEventListener('keydown', e => { if (e.key === ' ' && e.target && e.target.closest && e.target.closest('button')) e.preventDefault(); }, true);
+  addEventListener('keyup', e => { if (e.key === ' ' && e.target && e.target.closest && e.target.closest('button')) e.preventDefault(); }, true);
+  // light the keys for real key presses too (and for the pad's own, which arrive the same way)
+  addEventListener('keydown', e => { const el = els[e.key]; if (el) el.classList.add('down'); });
+  addEventListener('keyup', e => { const el = els[e.key]; if (el) el.classList.remove('down'); });
+  addEventListener('blur', () => Object.values(els).forEach(el => el.classList.remove('down')));
+}
+
+</script>
+<script>
+/* T4 噬菌体注入 DNA
+
+Truth first — the four button steps follow the infection sequence:
+1. The free phage approaches the rod-shaped E. coli surface; six long tail
+   fibres unfold from their retracted position and reversibly recognise LPS
+   and/or OmpC.
+2. The short tail fibres extend and bind irreversibly; the baseplate changes
+   from a dome to a star.
+3. The tail sheath contracts from 92.5 nm to 42 nm and drives the tail tube
+   through the outer membrane and peptidoglycan. The gp5/gp5.4 tip punctures the
+   membrane and gp5's lysozyme domain locally digests peptidoglycan.
+4. The 168,903 bp dsDNA genome travels through the internal tail tube into the
+   host cytoplasm. At the end of this clip, the capsid contains 0% DNA and the
+   complete DNA mass is visible in the cytoplasm.
+
+Parts held together in the model:
+HEAD       prolate icosahedral capsid . portal/neck collar . packaged dsDNA
+TAIL       contractile gp18 sheath . internal gp19 tail tube . gp5/gp5.4 tip
+BASEPLATE  central hub . six star petals (gp10/gp11/gp12 region) . six short fibres
+FIBRES     six long tail fibres with two hinged segments and membrane receptor feet
+HOST       upper 120-degree sector of a side-lying cylindrical E. coli .
+           outer membrane with LPS/OmpC . continuous peptidoglycan sheet .
+           inner membrane . cytoplasm
+
+Units are diagrammatic: 1 engine unit = 2 nm. The sheath is therefore 46.25
+units long when extended and 21 units when contracted.
+*/
+
+const T4_W = 220, T4_D = 150, T4_H = 184;
+const T4_AX = 110, T4_AY = 75;
+const T4_HOST_TOP = 48;
+const T4_ZBASE = 26;
+const T4_START_LIFT = 22;
+const T4_ATTACH_LIFT = 10;
+const T4_LOCKED_LIFT = 2;
+const T4_TUBE_PENETRATION = 23.8;
+const T4_LONG_FIBRE_SEGMENT = 20.2;
+const T4_WELL = rectUV(76, 47, 144, 103);
+
+const T4_INK = '#231e16';
+const T4_PAPER = '#f2efe7';
+const T4_CAPSID = { l:'#b9ead1', m:'#83cfad', d:'#2f725b' };
+const T4_SHEATH = { l:'#f4be46', m:'#dc9827', d:'#7b4a13' };
+const T4_SHEATH_HOT = { l:'#f18a69', m:'#dd5e43', d:'#7c2d23' };
+const T4_TUBE = { l:'#f4b4c4', m:'#d9829a', d:'#71364a' };
+const T4_PLATE = { l:'#82afe9', m:'#5c86ca', d:'#263f72' };
+const T4_FIBRE = { l:'#f4c548', m:'#d99d23', d:'#76500e' };
+const T4_SHORT_FIBRE = { l:'#f28a69', m:'#dc5d45', d:'#762e24' };
+const T4_OUTER = { l:'#f58b68', m:'#dc6047', d:'#7b2d24' };
+const T4_INNER = { l:'#7cace8', m:'#5684c8', d:'#263e70' };
+const T4_CYTO = { l:'#d7ead1', m:'#b9d5b4', d:'#6f9272' };
+const T4_PG = { l:'#f4c84c', m:'#d69d24', d:'#7c520d' };
+const T4_CYTOPLASM = { l:'#f0f0ec', m:'#d8d8d2', d:'#adafaa' };
+const T4_PILUS = '#4f9a74';
+const T4_FLAGELLUM = '#c18a29';
+const T4_WHISKER = { l:'#fff4d6', m:'#dfd2b3', d:'#8d8069' };
+const T4_DNA_A = '#5f8fe0';
+const T4_DNA_B = '#ef6a88';
+const T4_GOLD = '#f4b829';
+const T4_GREEN = '#43a66d';
+
+const T4_STEPS = [
+  {
+    title: '宿主受体识别',
+    titleEn: 'Receptor recognition',
+    say: '六根长尾丝从贴紧尾鞘的收拢状态展开，向下识别 LPS 与 OmpC 并发生可逆结合。',
+    sayEn: 'Six long tail fibres unfold from their retracted position, reach down to LPS and OmpC, and bind reversibly.',
+    detail: '噬菌体从细菌表面上方接近；尾丝是“试锁”的探针，真正锁定前仍可能脱离。',
+    detailEn: 'The free phage approaches from above. The fibres probe the surface, so the phage can still detach before locking.'
+  },
+  {
+    title: '基板构象锁定',
+    titleEn: 'Baseplate locking',
+    say: '短尾丝展开并不可逆地结合 LPS，基板由穹顶形切换为星形。',
+    sayEn: 'Short tail fibres extend and bind LPS irreversibly; the baseplate changes from a dome to a star.',
+    detail: '这个构象变化把触发信号送到尾鞘，是后续收缩的开关。',
+    detailEn: 'This shape change sends the trigger to the tail sheath and enables contraction.'
+  },
+  {
+    title: '尾鞘收缩与穿膜',
+    titleEn: 'Sheath contraction',
+    say: '尾鞘从约 93 nm 收缩到 42 nm，推动内部尾管穿过外膜和肽聚糖。',
+    sayEn: 'The sheath contracts from about 93 nm to 42 nm and drives the tail tube through the envelope.',
+    detail: 'gp5 的溶菌酶结构域在肽聚糖上形成局部通道，为 DNA 打开入口。',
+    detailEn: 'The gp5 lysozyme domain locally clears peptidoglycan and opens a path for DNA.'
+  },
+  {
+    title: '基因组注入',
+    titleEn: 'Genome injection',
+    say: 'T4 的 168,903 bp 双链 DNA 沿尾管进入细胞质。',
+    sayEn: 'The 168,903 bp T4 DNA travels through the tail tube into the cytoplasm.',
+    detail: '进入宿主后，早期基因可迅速启动，接管细菌的转录与复制系统。',
+    detailEn: 'Once inside, early genes can start taking control of host transcription and replication.'
+  }
+];
+
+const T4_UI = {
+  zh: {
+    title: 'T4 噬菌体注入 DNA',
+    headerPrefix: '',
+    buttons: ['宿主受体识别', '基板构象锁定', '尾鞘收缩与穿膜', '基因组注入', '重置演示'],
+    controls: ['手绘抖动', '颜色', '视角', '部件标签'],
+    display: '显示方式',
+    language: '语言',
+    front: '正视角',
+    turntable: '旋转',
+    seeThrough: '透视',
+    labels: '标签',
+    credit: '使用 Colorfigures 制作',
+    palettes: ['芥末黄', '番茄红', '薄荷绿', '钴蓝', '腮红粉'],
+    initial: '噬菌体悬停在细菌表面上方，六根长尾丝收拢在尾鞘周围。点击首个按钮播放展开与附着动画。',
+    flowTitle: '感染过程',
+    overview: 'T4 以长尾丝识别宿主受体，基板展开后触发尾鞘收缩；尾管穿过被膜，将双链 DNA 注入细胞质。',
+    playing: step => `正在播放第 ${step} 段：`,
+    current: step => `当前步骤 · ${step} / 4`,
+    playingLabel: step => `正在播放 · ${step} / 4`,
+    sheath: '尾鞘长度',
+    capsidDna: '病毒 DNA',
+    genome: '基因组',
+    progress: '学习进度',
+    wait: () => '当前片段正在播放，请等待结束',
+    needFirst: () => '请按顺序先完成：',
+    reset: '已回到噬菌体接近细菌表面的起始帧',
+    headFull: percent => `衣壳内仍有 ${percent}% 的病毒 DNA。`,
+    headEmpty: '病毒 DNA 已全部进入细胞质。',
+    sheathNote: '收缩的是 gp18 尾鞘；内部的 gp19 尾管是 DNA 的通道。',
+    baseplateNote: '基板从穹顶形展开为星形，并触发尾鞘收缩。',
+    surface: '大肠杆菌表面',
+    longFibre: '长尾丝',
+    shortFibre: '短尾丝',
+    baseplate: '基板',
+    sheathTag: '尾鞘 gp18',
+    capsid: '衣壳',
+    neckTag: '颈须',
+    virusDna: '病毒 DNA',
+    seeLabels: ['长尾丝', '短尾丝', '基板 gp10-12', '尾鞘 gp18', '尾管 gp19', 'gp5 尖端', 'LPS / OmpC 受体', '外膜', '肽聚糖', '内膜']
+  },
+  en: {
+    title: 'T4 phage DNA injection',
+    headerPrefix: '',
+    buttons: ['Receptor recognition', 'Baseplate locking', 'Sheath contraction', 'Genome injection', 'Reset'],
+    controls: ['Hand-drawn wobble', 'Colour', 'View', 'Labels'],
+    display: 'Display',
+    language: 'Language',
+    front: 'Front',
+    turntable: 'Rotate',
+    seeThrough: 'Cutaway',
+    labels: 'Labels',
+    credit: 'Made with Colorfigures',
+    palettes: ['Mustard', 'Tomato', 'Mint', 'Cobalt', 'Blush'],
+    initial: 'The phage hovers above the bacterium with all six long tail fibres retracted against the sheath. Press the first control to unfold and attach them.',
+    flowTitle: 'INFECTION PROCESS',
+    overview: 'T4 recognises host receptors with its long tail fibres, locks the baseplate, contracts the sheath, and injects double-stranded DNA into the cytoplasm.',
+    playing: step => `Playing clip ${step}: `,
+    current: step => `CURRENT STEP · ${step} / 4`,
+    playingLabel: step => `PLAYING · ${step} / 4`,
+    sheath: 'Sheath length',
+    capsidDna: 'VIRAL DNA',
+    genome: 'Genome',
+    progress: 'Learning progress',
+    wait: () => 'The current clip is playing; wait for it to finish',
+    needFirst: () => 'Complete this step first: ',
+    reset: 'Reset to the free-phage frame above the bacterium',
+    headFull: percent => `${percent}% of the viral DNA remains in the capsid.`,
+    headEmpty: 'All viral DNA has entered the cytoplasm.',
+    sheathNote: 'The gp18 sheath contracts; the inner gp19 tail tube is the DNA channel.',
+    baseplateNote: 'The baseplate opens from a dome into a star and triggers sheath contraction.',
+    surface: 'E. COLI SURFACE',
+    longFibre: 'LTF',
+    shortFibre: 'STF',
+    baseplate: 'BASEPLATE',
+    sheathTag: 'GP18 SHEATH',
+    capsid: 'CAPSID',
+    neckTag: 'WHISKERS',
+    virusDna: 'VIRAL DNA',
+    seeLabels: ['LONG TAIL FIBRES', 'SHORT TAIL FIBRES', 'BASEPLATE GP10-12', 'GP18 SHEATH', 'GP19 TAIL TUBE', 'GP5 SPIKE', 'LPS / OMPC RECEPTORS', 'OUTER MEMBRANE', 'PEPTIDOGLYCAN', 'INNER MEMBRANE']
+  }
+};
+
+const t4Lang = st => T4_UI[st.lang === 'en' ? 'en' : 'zh'];
+const t4Title = (step, st) => st.lang === 'en' ? step.titleEn : step.title;
+const t4Say = (step, st) => st.lang === 'en' ? step.sayEn : step.say;
+const t4Detail = (step, st) => st.lang === 'en' ? step.detailEn : step.detail;
+
+const t4BoundsOf = pts => [
+  [0, 1, 2].map(i => Math.min(...pts.map(p => p[i])) - .8),
+  [0, 1, 2].map(i => Math.max(...pts.map(p => p[i])) + .8)
+];
+const t4Ring = (x, y, z, r, n = 12, turn = 0) => Array.from({ length:n }, (_, i) => {
+  const a = i / n * Math.PI * 2 + turn;
+  return [x + r * Math.cos(a), y + r * Math.sin(a), z];
+});
+const t4BoxFromRings = rings => t4BoundsOf(rings.flat());
+const t4RingAt = (ring, i) => ring[(i + ring.length) % ring.length];
+
+function t4Prism(poly, z0, z1, material, weight = .9) {
+  const low = poly.map(([x, y]) => [x, y, z0]);
+  const high = poly.map(([x, y]) => [x, y, z1]);
+  let out = '';
+  if (vis([0, 0, -1])) out += shape(low, tone([0, 0, -1], material), weight);
+  if (vis([0, 0, 1])) out += shape(high, tone([0, 0, 1], material), weight);
+  for (let i = 0; i < poly.length; i++) {
+    const j = (i + 1) % poly.length;
+    const dx = poly[j][0] - poly[i][0], dy = poly[j][1] - poly[i][1];
+    const normal = norm([dy, -dx, 0]);
+    if (vis(normal)) out += shape([low[i], low[j], high[j], high[i]], tone(normal, material), weight);
+  }
+  return out + hullInk([...low, ...high], Math.max(1.3, weight * 1.8));
+}
+
+function t4Line(pts, color, width = .7) {
+  const path = pd(pts, false);
+  return `<path d="${path}" fill="none" stroke="${T4_INK}" stroke-width="${f(width + 1.1)}" stroke-linecap="round" stroke-linejoin="round"/>`
+    + `<path d="${path}" fill="none" stroke="${color}" stroke-width="${f(width)}" stroke-linecap="round" stroke-linejoin="round"/>`;
+}
+
+const t4MixMat = (a, b, k) => ({
+  l: mix(a.l, b.l, k),
+  m: mix(a.m, b.m, k),
+  d: mix(a.d, b.d, k)
+});
+
+const t4Lerp = (a, b, k) => a + (b - a) * k;
+const t4Lift = st => T4_ZBASE + (st.lift || 0);
+
+function t4TrimPath(pts, amount) {
+  const k = Math.max(0, Math.min(1, amount));
+  if (k <= 0) return [];
+  const lengths = [];
+  let total = 0;
+  for (let i = 1; i < pts.length; i++) {
+    const len = Math.hypot(...pts[i].map((v, j) => v - pts[i - 1][j]));
+    lengths.push(len);
+    total += len;
+  }
+  let left = total * k;
+  const out = [pts[0]];
+  for (let i = 1; i < pts.length; i++) {
+    const len = lengths[i - 1];
+    if (left >= len) {
+      out.push(pts[i]);
+      left -= len;
+    } else {
+      const u = len ? left / len : 0;
+      out.push(pts[i - 1].map((v, j) => v + (pts[i][j] - v) * u));
+      break;
+    }
+  }
+  return out;
+}
+
+function t4Capsid(st, x, y, z0, material) {
+  // Reference: QQ20261111-002944. The T4 head is a prolate icosahedron:
+  // twelve vertices and twenty large triangular facets on a five-fold axis.
+  const ringSpecs = [
+    [42, 23, 0],
+    [11, 23, Math.PI / 5]
+  ];
+  const top = [x, y, z0 + 58];
+  const bottom = [x, y, z0];
+  const rings = ringSpecs.map(([h, r, turn]) => t4Ring(x, y, z0 + h, r, 5, turn));
+  const verts = [top, ...rings.flat(), bottom];
+  const ringStart = i => 1 + i * 5;
+  const faces = [];
+  for (let i = 0; i < 5; i++) {
+    const j = (i + 1) % 5;
+    faces.push([0, ringStart(0) + i, ringStart(0) + j]);
+  }
+  for (let band = 0; band < rings.length - 1; band++) {
+    const a0 = ringStart(band), b0 = ringStart(band + 1);
+    for (let i = 0; i < 5; i++) {
+      const j = (i + 1) % 5;
+      const aI = a0 + i, aJ = a0 + j, bI = b0 + i, bJ = b0 + j;
+      faces.push([aI, aJ, bI], [aJ, bJ, bI]);
+    }
+  }
+  const last = ringStart(rings.length - 1);
+  for (let i = 0; i < 5; i++) {
+    const j = (i + 1) % 5;
+    faces.push([verts.length - 1, last + j, last + i]);
+  }
+
+  const center = [x, y, z0 + 29];
+  const faceData = faces.map(idx => {
+    const tri = idx.map(i => verts[i]);
+    let normal = norm(cross(sub(tri[1], tri[0]), sub(tri[2], tri[0])));
+    if (dot(normal, sub(avg(tri), center)) < 0) normal = normal.map(v => -v);
+    return { idx, tri, normal };
+  });
+  const supportViolations = faceData.reduce((sum, { tri, normal }) =>
+    sum + verts.filter(v => dot(normal, sub(v, tri[0])) > .001).length, 0);
+  const convex = supportViolations === 0;
+  const visible = [];
+  const edges = new Map();
+  for (const { idx, tri, normal } of faceData) {
+    if (!vis(normal)) continue;
+    visible.push({
+      at:avg(tri),
+      box:t4BoundsOf(tri),
+      svg:face(pd(tri), tone(normal, material)).replace('<path ', '<path data-facet="triangle" ')
+    });
+    for (const [a, b] of [[idx[0], idx[1]], [idx[1], idx[2]], [idx[2], idx[0]]]) {
+      const key = a < b ? `${a}:${b}` : `${b}:${a}`;
+      if (!edges.has(key)) edges.set(key, [verts[a], verts[b]]);
+    }
+  }
+  let svg = `<g data-capsid="prolate-icosahedron" data-faces="${faces.length}" data-top="fivefold-apex" data-convex="${convex}" data-support-violations="${supportViolations}">${byDepth(visible)}`;
+  for (const edge of edges.values()) svg += ink(pd(edge, false), .62);
+  svg += hullInk(verts, 2.8) + '</g>';
+  return { svg, box: t4BoundsOf(verts), top: z0 + 58 };
+}
+
+function t4Sheath(st, x, y) {
+  const contract = st.contract || 0;
+  const lift = t4Lift(st);
+  const z0 = 20.5 + lift;
+  const z1 = 66.5 + lift - 27 * contract;
+  const radius = 6.1 + 3.3 * contract;
+  const count = 14;
+  const rings = Array.from({ length:count + 1 }, (_, i) => {
+    const u = i / count;
+    const z = z0 + (z1 - z0) * u;
+    const bulge = t4Lerp(.04 * Math.sin(u * Math.PI * 7), .08 * Math.sin(u * Math.PI * 3), contract);
+    const rr = radius * (1 + bulge);
+    return t4Ring(x, y, z, rr, 12, u * Math.PI * t4Lerp(.34, .5, contract));
+  });
+  const material = t4MixMat(T4_SHEATH, T4_SHEATH_HOT, contract);
+  let svg = '';
+  for (let i = 0; i < rings.length - 1; i++) svg += loft(rings[i], rings[i + 1], n => tone(n, material));
+  for (let h = 0; h < 6; h++) {
+    for (let i = 0; i < rings.length - 1; i++) {
+      const a = t4RingAt(rings[i], h * 2);
+      const b = t4RingAt(rings[i + 1], h * 2);
+      const mx = (a[0] + b[0]) / 2 - x, my = (a[1] + b[1]) / 2 - y;
+      if (vis([mx, my, 0])) svg += line([a, b], .35);
+    }
+  }
+  for (let i = 1; i < rings.length - 1; i++) {
+    for (let k = 0; k < 12; k++) {
+      const a = t4RingAt(rings[i], k), b = t4RingAt(rings[i], k + 1);
+      const mx = (a[0] + b[0]) / 2 - x, my = (a[1] + b[1]) / 2 - y;
+      if (vis([mx, my, 0])) svg += line([a, b], .3);
+    }
+  }
+  svg += hullInk(rings.flat(), 2.3);
+  return { svg, box: t4BoxFromRings(rings), z0, z1 };
+}
+
+function t4Neck(x, y, z0, z1) {
+  const rings = [t4Ring(x, y, z0, 7.2), t4Ring(x, y, z0 + (z1 - z0) * .35, 5.5), t4Ring(x, y, z1, 8.2)];
+  let svg = loft(rings[0], rings[1], n => toneI(n, T4_PLATE)) + loft(rings[1], rings[2], n => toneI(n, T4_PLATE));
+  svg += hullInk(rings.flat(), 1.7);
+  return { svg:`<g data-neck="collar">${svg}</g>`, box:t4BoxFromRings(rings) };
+}
+
+function t4WhiskerGeometry(x, y, z) {
+  return Array.from({ length:6 }, (_, i) => {
+    const a = i / 6 * Math.PI * 2 + .16;
+    const bendA = a + (i % 2 ? .09 : -.09);
+    const tipA = a + (i % 2 ? -.04 : .04);
+    const length = 13.8 + (i % 3) * 1;
+    const start = [x + 7.7 * Math.cos(a), y + 7.7 * Math.sin(a), z + 1.1];
+    const bend = [x + 11.2 * Math.cos(bendA), y + 11.2 * Math.sin(bendA), z - 4.5 - (i % 2) * 1.1];
+    const tip = [x + length * Math.cos(tipA), y + length * Math.sin(tipA), z - 11 - (i % 3) * 1.3];
+    return { i, start, bend, tip };
+  });
+}
+
+function t4Whiskers(x, y, z) {
+  const parts = [];
+  for (const { i, start, bend, tip } of t4WhiskerGeometry(x, y, z)) {
+    const box = t4BoundsOf([start, bend, tip]);
+    const svg = `<g data-whisker="${i}" data-attached-to="neck" data-root="${start.join(',')}" data-tip="${tip.join(',')}">`
+      + t4Line([start, bend, tip], T4_WHISKER.m, .48)
+      + fill(pd(on(PZ(start[2]), ellUV(start[0], start[1], .72, .72, 8))), T4_WHISKER.l, `opacity=".88"`)
+      + `</g>`;
+    parts.push({ at:start, box, svg });
+  }
+  return parts;
+}
+
+function t4Baseplate(st, x, y) {
+  const star = st.lock || 0;
+  const lift = t4Lift(st);
+  const z0 = 19.8 + lift;
+  const z1 = 25.2 + lift - 3 * star;
+  const parts = [];
+  const hubRings = [t4Ring(x, y, z0, 7.2, 6), t4Ring(x, y, z1, 8.2 - 1.6 * star, 6, .12)];
+  let hub = loft(hubRings[0], hubRings[1], n => toneI(n, T4_PLATE));
+  hub += vis([0, 0, 1]) ? fill(pd(hubRings[1]), toneI([0, 0, 1], T4_PLATE)) + ink(pd(hubRings[1]), 1.0) : '';
+  hub += hullInk(hubRings.flat(), 1.8);
+  parts.push({ box:t4BoxFromRings(hubRings), svg:hub });
+
+  for (let i = 0; i < 6; i++) {
+    const a = i / 6 * Math.PI * 2 + .18;
+    const half = Math.PI / 8.5;
+    const r0 = 3.8;
+    const r1 = 10.5 + 8.5 * star;
+    const poly = [
+      [x + r0 * Math.cos(a - half), y + r0 * Math.sin(a - half)],
+      [x + r0 * Math.cos(a + half), y + r0 * Math.sin(a + half)],
+      [x + r1 * Math.cos(a + half * .62), y + r1 * Math.sin(a + half * .62)],
+      [x + (r1 + 2.3) * Math.cos(a), y + (r1 + 2.3) * Math.sin(a)],
+      [x + r1 * Math.cos(a - half * .62), y + r1 * Math.sin(a - half * .62)]
+    ];
+    const petalZ0 = 20.4 + lift - .5 * star;
+    const petalZ1 = 23.6 + lift + 1.6 * (1 - Math.abs(i - 2.5) / 2.5) - 2.9 * star;
+    parts.push({
+      box:t4BoundsOf(poly.flatMap(([px, py]) => [[px, py, petalZ0], [px, py, petalZ1]])),
+      svg:t4Prism(poly, petalZ0, petalZ1, T4_PLATE, .8)
+    });
+  }
+  return { parts, z1 };
+}
+
+function t4LongFibreGeometry(st, x, y) {
+  const attached = st.attach || 0;
+  const unfold = ease(attached);
+  const lift = t4Lift(st);
+  return Array.from({ length:6 }, (_, i) => {
+    const a = i / 6 * Math.PI * 2 + .28;
+    const ca = Math.cos(a), sa = Math.sin(a);
+    const pa = [x + 7.2 * ca, y + 7.2 * sa, 22.8 + lift];
+    const foldedElbow = [x + 9.5 * ca, y + 9.5 * sa, 22.8 + lift + 16];
+    const tipX = x + T4_FIBRE_RADIUS * ca, tipY = y + T4_FIBRE_RADIUS * sa;
+    const tipZ = t4SurfacePoint(tipX, tipY)[2];
+    const foldedTip = [x + 10.5 * ca, y + 10.5 * sa, 22.8 + lift + 33];
+    const openTip = [tipX, tipY, tipZ + .8];
+
+    // Equal-length V: place the open knee on the perpendicular bisector of
+    // baseplate-root to receptor-tip, choosing the outward/upward solution.
+    const chordR = T4_FIBRE_RADIUS - 7.2;
+    const chordZ = openTip[2] - pa[2];
+    const chord = Math.hypot(chordR, chordZ);
+    const halfChord = chord / 2;
+    const kneeOffset = Math.sqrt(Math.max(0, T4_LONG_FIBRE_SEGMENT ** 2 - halfChord ** 2));
+    let kneePerp = [ -chordZ / chord, chordR / chord ];
+    if (kneePerp[0] < 0) kneePerp = kneePerp.map(v => -v);
+    const kneeR = (7.2 + T4_FIBRE_RADIUS) / 2 + kneePerp[0] * kneeOffset;
+    const kneeZ = (pa[2] + openTip[2]) / 2 + kneePerp[1] * kneeOffset;
+    const openElbow = [x + kneeR * ca, y + kneeR * sa, kneeZ];
+    const pe = foldedElbow.map((v, k) => v + (openElbow[k] - v) * unfold);
+    const pt = foldedTip.map((v, k) => v + (openTip[k] - v) * unfold);
+    return { i, pa, pe, pt, tipZ, mat:i % 2 ? T4_FIBRE : { l:'#f4d370', m:'#d5a82e', d:'#765511' } };
+  });
+}
+
+function t4FibreParts(st, x, y) {
+  const parts = [];
+  const attached = st.attach || 0;
+  const locked = st.lock || 0;
+  for (const { i, pa, pe, pt, tipZ, mat } of t4LongFibreGeometry(st, x, y)) {
+    const a1 = rod(pa, pe, .7, mat, toneI, 1.0, .58, 10);
+    const a2 = rod(pe, pt, .55, mat, toneI, .9, .42, 10);
+    parts.push({
+      at:pa,
+      box:t4BoundsOf([pa, pe]),
+      svg:`<g data-tail-fibre="long-${i}" data-segment="proximal" data-from="${pa.join(',')}" data-to="${pe.join(',')}">${a1}</g>`
+    });
+    parts.push({
+      at:pe,
+      box:t4BoundsOf([pe, pt]),
+      svg:`<g data-tail-fibre="long-${i}" data-segment="distal" data-from="${pe.join(',')}" data-to="${pt.join(',')}">${a2}</g>`
+    });
+    if (attached > .65) {
+      const footK = Math.min(1, (attached - .65) / .35);
+      const foot = [
+        [pt[0] - 2.7 * footK, pt[1] - 2.7 * footK, tipZ + .1],
+        [pt[0] + 2.7 * footK, pt[1] + 2.7 * footK, tipZ + 1.4 * footK]
+      ];
+      parts.push({
+        box:foot,
+        svg:cyl(pt[0], pt[1], tipZ + .1, tipZ + 1.15, 2.2 * footK, locked > .5 ? T4_PLATE : T4_FIBRE, toneI, .7, 14)
+      });
+    }
+  }
+  return parts;
+}
+
+function t4ShortFibreGeometry(st, x, y) {
+  const locked = st.lock || 0;
+  const lift = t4Lift(st);
+  return Array.from({ length:6 }, (_, i) => {
+    const a = i / 6 * Math.PI * 2 + .52;
+    const ca = Math.cos(a), sa = Math.sin(a);
+    const pa = [x + 8 * ca, y + 8 * sa, 22.6 + lift];
+    const folded = [x + 10.8 * ca, y + 10.8 * sa, 29.5 + lift];
+    const openX = x + 18 * ca, openY = y + 18 * sa;
+    const open = [openX, openY, t4SurfacePoint(openX, openY)[2] + .7];
+    const pb = folded.map((v, k) => v + (open[k] - v) * locked);
+    return { i, pa, pb };
+  });
+}
+
+function t4ShortFibres(st, x, y) {
+  const parts = [];
+  const locked = st.lock || 0;
+  for (const { i, pa, pb } of t4ShortFibreGeometry(st, x, y)) {
+    parts.push({
+      box:t4BoundsOf([pa, pb]),
+      svg:`<g data-tail-fibre="short-${i}" data-from="${pa.join(',')}" data-to="${pb.join(',')}">${rod(pa, pb, .48, T4_SHORT_FIBRE, toneI, .8, .36, 9)}</g>`
+    });
+    if (locked > .08) {
+      parts.push({
+        box:[[pb[0] - 1.5 * locked, pb[1] - 1.5 * locked, pb[2] - .7], [pb[0] + 1.5 * locked, pb[1] + 1.5 * locked, pb[2]]],
+        svg:`<g data-tail-fibre="short-${i}" data-foot="true">${cyl(pb[0], pb[1], pb[2] - .7, pb[2], 1.25 * locked, matOf(T4_GOLD), toneI, .45, 10)}</g>`
+      });
+    }
+  }
+  return parts;
+}
+
+function t4TubeTip(st, x, y) {
+  const penetration = st.contract || 0;
+  if (penetration <= .005) return '';
+  const z1 = 20.1 + t4Lift(st);
+  const z0 = z1 - T4_TUBE_PENETRATION * penetration;
+  const rings = [t4Ring(x, y, z0, 2.45, 14), t4Ring(x, y, z1, 2.45, 14)];
+  let svg = loft(rings[0], rings[1], n => toneI(n, T4_TUBE));
+  svg += fill(pd(rings[0]), toneI([0, 0, -1], T4_TUBE)) + ink(pd(rings[0]), .7);
+  let gp5 = '';
+  if (penetration > .72) {
+    gp5 = `<g data-gp5-tip="true" data-at="${[x, y, z0 - 2.15].join(',')}">${rod([x, y, z0], [x, y, z0 - 4.3], 1.5, { l:'#ffe37b', m:'#e8b73a', d:'#8a5c10' }, toneI, .8, .16, 12)}</g>`;
+  }
+  svg += hullInk(rings.flat(), 1.3);
+  return `<g data-tail-tube="true">${svg}${gp5}</g>`;
+}
+
+const T4_CELL_RX = 84;
+const T4_CELL_RZ = T4_HOST_TOP;
+const T4_ARC_START = 30;
+const T4_ARC_END = 150;
+const T4_FIBRE_RADIUS = 32;
+const t4EllArc = (cu, cv, rx, rz, a0, a1, n = 40) => Array.from({ length:n + 1 }, (_, i) => {
+  const angle = (a0 + (a1 - a0) * i / n) * Math.PI / 180;
+  return [cu + rx * Math.cos(angle), cv + rz * Math.sin(angle)];
+});
+const t4ArcRing = (y, rx = T4_CELL_RX, rz = T4_CELL_RZ, n = 40) =>
+  on(PY(y), t4EllArc(T4_AX, 0, rx, rz, T4_ARC_START, T4_ARC_END, n));
+const t4SurfacePoint = (x, y) => {
+  const edge = Math.cos(T4_ARC_START * Math.PI / 180);
+  const dx = Math.max(-edge, Math.min(edge, (x - T4_AX) / T4_CELL_RX));
+  return [x, y, T4_CELL_RZ * Math.sqrt(1 - dx * dx)];
+};
+const t4SurfaceNormal = (x, z) => norm([
+  (x - T4_AX) / (T4_CELL_RX * T4_CELL_RX),
+  0,
+  z / (T4_CELL_RZ * T4_CELL_RZ)
+]);
+const t4ArcQuadBand = (y, outerRx, outerRz, innerRx, innerRz, color, n = 40) => {
+  const outer = on(PY(y), t4EllArc(T4_AX, 0, outerRx, outerRz, T4_ARC_START, T4_ARC_END, n));
+  const inner = on(PY(y), t4EllArc(T4_AX, 0, innerRx, innerRz, T4_ARC_START, T4_ARC_END, n));
+  let out = '';
+  for (let i = 0; i < outer.length - 1; i++) {
+    out += face(pd([outer[i], outer[i + 1], inner[i + 1], inner[i]]), color);
+  }
+  out += ink(pd(outer, false), 1.1) + ink(pd(inner, false), 1.0);
+  out += ink(pd([outer[0], inner[0]], false), .9) + ink(pd([outer[outer.length - 1], inner[inner.length - 1]], false), .9);
+  return out;
+};
+function t4ArcLoft(A, B, material) {
+  let out = '';
+  for (let i = 0; i < A.length - 1; i++) {
+    const quad = [A[i], A[i + 1], B[i + 1], B[i]];
+    let normal = norm(cross(sub(A[i + 1], A[i]), sub(B[i], A[i])));
+    if (!isFinite(normal[0])) continue;
+    if (dot(normal, sub(avg(quad), [T4_AX, (A[i][1] + B[i][1]) / 2, 0])) < 0) normal = normal.map(v => -v);
+    if (vis(normal)) out += face(pd(quad), tone(normal, material));
+  }
+  return out;
+}
+
+function t4HostUpper(st, surfaceMat) {
+  const y0 = 4, y1 = 146;
+  const outerA = t4ArcRing(y0), outerB = t4ArcRing(y1);
+  const outerMat = t4MixMat(surfaceMat, T4_OUTER, .12);
+  const cytoMat = T4_CYTOPLASM;
+  const cytoA = t4ArcRing(y0, 74.8, 41.1), cytoB = t4ArcRing(y1, 74.8, 41.1);
+  const pgA = t4ArcRing(y0, 79.8, 45.3), pgB = t4ArcRing(y1, 79.8, 45.3);
+  const innerA = t4ArcRing(y0, 76.6, 43.0), innerB = t4ArcRing(y1, 76.6, 43.0);
+  const capFace = (y, side) => {
+    const fullFace = on(PY(y), t4EllArc(T4_AX, 0, 84, 48, T4_ARC_START, T4_ARC_END, 40));
+    let cap = fill(pd(fullFace), cytoMat.l) + ink(pd(fullFace), 1.2);
+    cap += `<g data-membrane="outer" data-side="${side}">${t4ArcQuadBand(y - .03, 84, 48, 77, 44, T4_OUTER.m)}</g>`;
+    cap += `<g data-membrane="peptidoglycan" data-side="${side}">${t4ArcQuadBand(y - .05, 76.2, 43.8, 69.5, 40.2, T4_PG.m)}</g>`;
+    cap += `<g data-membrane="inner" data-side="${side}">${t4ArcQuadBand(y - .07, 68.7, 40, 62, 36.3, T4_INNER.m)}</g>`;
+    return cap;
+  };
+  const ends = [y0, y1].map(y => ({ y, depth: depthOf([T4_AX, y, 0]) })).sort((a, b) => a.depth - b.depth);
+  let svg = '';
+  svg += capFace(ends[0].y, 'far');
+
+  svg += `<g data-membrane-wall="cytoplasm" opacity=".92">${t4ArcLoft(cytoA, cytoB, T4_CYTOPLASM)}</g>`;
+  svg += `<g data-membrane-wall="peptidoglycan" opacity=".94">${t4ArcLoft(pgA, pgB, T4_PG)}</g>`;
+  svg += `<g data-membrane-wall="inner" opacity=".96">${t4ArcLoft(innerA, innerB, T4_INNER)}</g>`;
+  svg += `<g data-membrane-wall="outer" opacity=".9">${t4ArcLoft(outerA, outerB, outerMat)}</g>`;
+  svg += hullInk([...outerA, ...outerB], 3);
+
+  svg += capFace(ends[1].y, 'near');
+
+  const digestion = st.contract || 0;
+  if (digestion > .01) {
+    const opening = on(PZ(T4_HOST_TOP + .08), ellUV(T4_AX, T4_AY, 2.8 + 2.2 * digestion, 2.2 + 1.6 * digestion, 20));
+    svg += fill(pd(opening), '#173d33', `opacity="${f(.74 * digestion)}"`);
+    svg += ink(pd(opening), 1.1);
+  }
+
+  // A faint inner circumference makes the open interior readable through the shell.
+  svg += ink(pd(innerA), .75) + ink(pd(innerB), .75);
+
+  // Six receptor clusters are placed exactly under the six fibre tips on the curved wall.
+  for (let i = 0; i < 6; i++) {
+    const a = i / 6 * Math.PI * 2 + .28;
+    const x = T4_AX + T4_FIBRE_RADIUS * Math.cos(a);
+    const y = T4_AY + T4_FIBRE_RADIUS * Math.sin(a);
+    const [px, py, pz] = t4SurfacePoint(x, y);
+    const normal = t4SurfaceNormal(px, pz);
+    if (!vis(normal)) continue;
+    const base = [px - normal[0] * .7, py, pz - normal[2] * .7];
+    const tip = [px + normal[0] * 2.1, py, pz + normal[2] * 2.1];
+    let receptor = rod(base, tip, 1.35, T4_PLATE, toneI, .7, 1.0, 12);
+    receptor += fill(pd(on(PZ(pz + 2.2), ellUV(px, py, 1.0, 1.0, 10))), T4_PLATE.l, `opacity="${f(.45 + .4 * (st.attach || 0))}"`);
+    for (let j = 0; j < 4; j++) {
+      const aa = a + j * Math.PI * 2 / 4 + .12;
+      const ex = px + Math.cos(aa) * 4.6 + normal[0] * 2.4;
+      const ey = py + Math.sin(aa) * 4.6;
+      const ez = pz + normal[2] * 2.4 + 2.4;
+      receptor += t4Line([tip, [ex, ey, ez]], T4_GOLD, .38);
+      receptor += shape(on(PZ(ez), ellUV(ex, ey, .44, .44, 7)), T4_GOLD, .16);
+    }
+    svg += `<g data-receptor="${i}" data-at="${tip.join(',')}">${receptor}</g>`;
+  }
+
+  // Pili occur in irregular patches over the curved surface, not as a perimeter ring.
+  const piliSeeds = [
+    [-55, 22], [-48, 40], [-57, 67], [-51, 91], [-55, 121],
+    [-32, 27], [-22, 58], [-31, 84], [-17, 116],
+    [15, 23], [36, 42], [53, 69], [56, 95], [43, 123],
+    [4, 37], [24, 76], [9, 109]
+  ];
+  for (let i = 0; i < piliSeeds.length; i++) {
+    const [dx, yy] = piliSeeds[i];
+    const [px, py, pz] = t4SurfacePoint(T4_AX + dx, yy);
+    const normal = t4SurfaceNormal(px, pz);
+    if (!vis(normal)) continue;
+    const len = 8 + (i * 7) % 10;
+    const side = i % 2 ? 1 : -1;
+    const a = [px + normal[0], py, pz + normal[2]];
+    const b = [px + normal[0] * len * .58, py + side * len * .32, pz + normal[2] * len * .58];
+    const c = [px + normal[0] * len, py + side * len * .58, pz + normal[2] * len];
+    svg += `<g data-pilus="${i}" data-structure="pilus">${t4Line([a, b, c], mix(surfaceMat.d, T4_PILUS, .5), .66)}</g>`;
+  }
+
+  return svg;
+}
+
+function t4FlagellaParts() {
+  const specs = [
+    [-1, 30, 54, 1.0, -1],
+    [-1, 84, 68, .9, 1],
+    [-1, 132, 52, .78, -1],
+    [1, 30, 54, 1.0, 1],
+    [1, 84, 68, .9, -1],
+    [1, 132, 52, .78, 1]
+  ];
+  return specs.map(([side, yy, dx, scale, wave], i) => {
+    const root = t4SurfacePoint(T4_AX + side * dx, yy);
+    const normal = t4SurfaceNormal(root[0], root[2]);
+    const out = (dist, lateral) => [
+      root[0] + normal[0] * dist * scale + side * lateral * .18,
+      root[1] + wave * lateral * .78,
+      root[2] + normal[2] * dist * scale + lateral * .12
+    ];
+    const flag = [
+      root,
+      out(8, 4),
+      out(14, 10),
+      out(16, 17),
+      out(12, 24),
+      out(5, 31)
+    ];
+    const id = side < 0 ? `left-${i % 3}` : `right-${i % 3}`;
+    return {
+      at:root,
+      side,
+      id,
+      box:t4BoundsOf(flag),
+      svg:`<g data-flagellum="${id}" data-structure="flagellum" data-side="${side < 0 ? 'left' : 'right'}" data-root="${root.join(',')}">${t4Line(flag, T4_FLAGELLUM, 1.05)}</g>`
+    };
+  });
+}
+
+function t4PathLength(points) {
+  let total = 0;
+  for (let i = 1; i < points.length; i++) {
+    total += Math.hypot(...points[i].map((v, j) => v - points[i - 1][j]));
+  }
+  return total;
+}
+
+function t4SlicePath(points, from, to) {
+  if (points.length < 2) return [];
+  const total = t4PathLength(points);
+  const a = Math.max(0, Math.min(total, from));
+  const b = Math.max(0, Math.min(total, to));
+  if (b - a < .001) return [];
+  const out = [];
+  let travelled = 0;
+  const add = p => {
+    const prev = out[out.length - 1];
+    if (!prev || Math.hypot(...p.map((v, j) => v - prev[j])) > .001) out.push(p);
+  };
+  for (let i = 1; i < points.length; i++) {
+    const p0 = points[i - 1], p1 = points[i];
+    const len = Math.hypot(...p1.map((v, j) => v - p0[j]));
+    const s0 = travelled, s1 = travelled + len;
+    if (s1 > a && s0 < b) {
+      const u0 = len ? Math.max(0, (a - s0) / len) : 0;
+      const u1 = len ? Math.min(1, (b - s0) / len) : 1;
+      add(p0.map((v, j) => v + (p1[j] - v) * u0));
+      add(p0.map((v, j) => v + (p1[j] - v) * u1));
+    }
+    travelled = s1;
+  }
+  return out;
+}
+
+function t4TwistPair(points, amount, twistRate = .28, amplitude = 1.15) {
+  const path = t4TrimPath(points, amount);
+  if (path.length < 2) return null;
+  const dense = [];
+  const lengths = [];
+  let total = 0;
+  for (let i = 1; i < path.length; i++) {
+    const len = Math.hypot(...path[i].map((v, j) => v - path[i - 1][j]));
+    lengths.push(len);
+    total += len;
+  }
+  const samples = Math.max(24, Math.ceil(total * 1.5));
+  for (let s = 0; s <= samples; s++) {
+    let left = total * s / samples;
+    let segment = 0;
+    while (segment < lengths.length - 1 && left > lengths[segment]) {
+      left -= lengths[segment];
+      segment++;
+    }
+    const a = path[segment], b = path[Math.min(segment + 1, path.length - 1)];
+    const u = lengths[segment] ? Math.min(1, left / lengths[segment]) : 0;
+    dense.push(a.map((v, j) => v + (b[j] - v) * u));
+  }
+  const strandA = [], strandB = [];
+  let travelled = 0;
+  for (let i = 0; i < dense.length; i++) {
+    if (i) travelled += Math.hypot(...dense[i].map((v, j) => v - dense[i - 1][j]));
+    const before = dense[Math.max(0, i - 1)], after = dense[Math.min(dense.length - 1, i + 1)];
+    const tangent = norm(sub(after, before));
+    let side = cross(tangent, [0, 0, 1]);
+    side = Math.hypot(...side) > .01 ? norm(side) : [1, 0, 0];
+    const up = norm(cross(side, tangent));
+    const angle = travelled * twistRate;
+    const amp = amplitude;
+    strandA.push(dense[i].map((v, j) => v + side[j] * Math.cos(angle) * amp + up[j] * Math.sin(angle) * amp));
+    strandB.push(dense[i].map((v, j) => v - side[j] * Math.cos(angle) * amp - up[j] * Math.sin(angle) * amp));
+  }
+  return { strandA, strandB };
+}
+
+function t4DnaRoutes(x, y, headBottom, tubeTip) {
+  const top = headBottom + 52;
+  const head = [
+    [x, y + 1, top],
+    [x + 9, y + 3, top - 5],
+    [x + 14, y - 2, top - 11],
+    [x + 8, y - 9, top - 17],
+    [x - 3, y - 10, top - 23],
+    [x - 12, y - 5, top - 29],
+    [x - 13, y + 5, top - 35],
+    [x - 4, y + 10, top - 41],
+    [x + 7, y + 7, top - 47],
+    [x + 3, y + 1, headBottom + 3],
+    [x, y, headBottom]
+  ];
+  const transit = [
+    [x, y, headBottom - 2],
+    [x + .35, y - .35, Math.max(tubeTip + 10, headBottom - 9)],
+    [x + .65, y - .65, tubeTip]
+  ];
+  const entryZ = Math.max(tubeTip - 12, 8);
+  const cytosol = [
+    [x + 4, y - 2, entryZ],
+    [x + 12, y - 8, Math.max(entryZ - 2, 7)],
+    [x + 22, y - 12, Math.max(entryZ - 4, 6)],
+    [x + 30, y - 8, Math.max(entryZ - 6, 5)],
+    [x + 39, y, Math.max(entryZ - 8, 4)],
+    [x + 45, y + 10, Math.max(entryZ - 11, 3.5)],
+    [x + 37, y + 20, Math.max(entryZ - 14, 3)],
+    [x + 24, y + 23, Math.max(entryZ - 17, 2.8)],
+    [x + 10, y + 20, 5],
+    [x - 4, y + 16, 4],
+    [x - 18, y + 11, 6],
+    [x - 29, y + 4, 9],
+    [x - 34, y - 6, 12],
+    [x - 27, y - 15, 15],
+    [x - 14, y - 20, 18],
+    [x + 1, y - 18, 20],
+    [x + 15, y - 13, 17],
+    [x + 25, y - 5, 14]
+  ];
+  return { head, transit, cytosol };
+}
+
+function t4DnaWindow(st, x, y, headBottom, tubeTip, mode = 'full') {
+  const inject = Math.max(0, Math.min(1, st.inject || 0));
+  const routes = t4DnaRoutes(x, y, headBottom, tubeTip);
+  const headLength = t4PathLength(routes.head);
+  const transitLength = t4PathLength(routes.transit);
+  const cytosolLength = t4PathLength(routes.cytosol);
+  const full = routes.head.concat(routes.transit.slice(1), routes.cytosol);
+  const releaseDistance = Math.min(36, cytosolLength * .2);
+  const start = inject * (headLength + transitLength + releaseDistance);
+  const end = headLength + inject * (transitLength + cytosolLength);
+  const from = mode === 'host' ? Math.max(start, headLength) : start;
+  const visible = t4SlicePath(full, from, end);
+  const remaining = Math.max(0, Math.min(1, (headLength - start) / headLength));
+  const entryClearance = Math.max(0, start - headLength - transitLength);
+  return { inject, visible, remaining, entryClearance, headLength, transitLength, cytosolLength };
+}
+
+function t4DnaLabelPoints(win, x, y, headBottom, tubeTip) {
+  return {
+    virusDna:win.visible.length ? win.visible[0] : [x, y, headBottom + 28]
+  };
+}
+
+function t4DnaInjection(st, x, y, headBottom, tubeTip, mode = 'full') {
+  const win = t4DnaWindow(st, x, y, headBottom, tubeTip, mode);
+  const { inject, visible, remaining, entryClearance } = win;
+  if (visible.length < 2) return '';
+  const pair = t4TwistPair(visible, 1, .13, 1.05);
+  if (!pair) return '';
+  const labelPoints = t4DnaLabelPoints(win, x, y, headBottom, tubeTip);
+  return `<g data-dna-route="continuous" data-dna-mode="${mode}" data-inject="${f(inject)}" data-head-remaining="${f(remaining)}" data-entry-clearance="${f(entryClearance)}" data-visible-length="${f(t4PathLength(visible))}" data-start="${visible[0].join(',')}" data-entry="${[x, y, tubeTip].join(',')}" data-virus-dna-anchor="${labelPoints.virusDna.join(',')}">`
+    + `<g data-dna-strand="blue">${t4Line(pair.strandA, T4_DNA_A, 1.12)}</g>`
+    + `<g data-dna-strand="red">${t4Line(pair.strandB, T4_DNA_B, 1.12)}</g></g>`;
+}
+
+function t4LabelAnchors(st, x = T4_AX, y = T4_AY) {
+  const lift = t4Lift(st), contract = st.contract || 0, inject = st.inject || 0;
+  const headBottom = 70.4 + lift - 27 * contract;
+  const tubeTip = 20.1 + lift - T4_TUBE_PENETRATION * contract;
+  const midpoint = (a, b, k = .5) => a.map((v, i) => v + (b[i] - v) * k);
+  const nearest = items => items.reduce((best, item) =>
+    !best || depthOf(item.at) > depthOf(best.at) ? item : best, null);
+  const visDir = norm([CAM_V[0], CAM_V[1], 0]);
+
+  const longFibres = t4LongFibreGeometry(st, x, y);
+  const longFibre = nearest(longFibres.map(f => ({
+    at:midpoint(f.pe, f.pt, .46),
+    from:f.pe,
+    to:f.pt
+  })));
+
+  const shortFibres = t4ShortFibreGeometry(st, x, y);
+  const shortFibre = nearest(shortFibres.map(f => ({
+    at:midpoint(f.pa, f.pb, .72),
+    from:f.pa,
+    to:f.pb
+  })));
+
+  const whiskers = t4WhiskerGeometry(x, y, headBottom - 3.1);
+  const whisker = nearest(whiskers.map(f => ({
+    at:midpoint(f.start, f.bend, .72),
+    from:f.start,
+    to:f.tip
+  })));
+
+  const sheathZ0 = 20.5 + lift;
+  const sheathZ1 = 66.5 + lift - 27 * contract;
+  const sheathRadius = 6.1 + 3.3 * contract;
+  const sheath = [
+    x + visDir[0] * sheathRadius * .96,
+    y + visDir[1] * sheathRadius * .96,
+    (sheathZ0 + sheathZ1) / 2
+  ];
+
+  const neckLoopRadius = 7.8;
+  const neck = [
+    x + visDir[0] * neckLoopRadius,
+    y + visDir[1] * neckLoopRadius,
+    headBottom - 2.1
+  ];
+  const capsid = [
+    x + visDir[0] * 22.5,
+    y + visDir[1] * 22.5,
+    headBottom + 29
+  ];
+
+  const receptorCandidates = [];
+  for (let i = 0; i < 6; i++) {
+    const a = i / 6 * Math.PI * 2 + .28;
+    const rx = x + T4_FIBRE_RADIUS * Math.cos(a);
+    const ry = y + T4_FIBRE_RADIUS * Math.sin(a);
+    const [px, py, pz] = t4SurfacePoint(rx, ry);
+    const normal = t4SurfaceNormal(px, pz);
+    if (vis(normal)) receptorCandidates.push({ at:[px + normal[0] * 2.3, py, pz + normal[2] * 2.3] });
+  }
+  const receptor = nearest(receptorCandidates)?.at || [x + visDir[0] * 42, y + visDir[1] * 28, T4_HOST_TOP];
+
+  const sideAngle = CAM_V[0] >= 0 ? 68 : 112;
+  const hostY0 = 4, hostY1 = 146;
+  const edgeY = depthOf([x, hostY0, 0]) > depthOf([x, hostY1, 0]) ? hostY0 : hostY1;
+  const layerPoint = (rx, rz) => [
+    x + rx * Math.cos(sideAngle * Math.PI / 180),
+    edgeY,
+    rz * Math.sin(sideAngle * Math.PI / 180)
+  ];
+  const outerMembrane = layerPoint(80.5, 46);
+  const peptidoglycan = layerPoint(72.85, 42);
+  const innerMembrane = layerPoint(65.35, 38.15);
+  const surface = t4SurfacePoint(x + visDir[0] * 52, y + 34);
+
+  const tubeZ0 = 20.1 + lift - T4_TUBE_PENETRATION * contract;
+  const tubeZ1 = 20.1 + lift;
+  const tailTube = [x, y, (tubeZ0 + tubeZ1) / 2];
+  const gp5Tip = [x, y, tubeZ0 - 2.15];
+
+  const dnaWin = t4DnaWindow(st, x, y, headBottom, tubeTip, 'full');
+  const { virusDna } = t4DnaLabelPoints(dnaWin, x, y, headBottom, tubeTip);
+
+  return {
+    longFibre:longFibre?.at || [x, y, 22.8 + lift],
+    shortFibre:shortFibre?.at || [x, y, 22.6 + lift],
+    baseplate:[x, y, 23.1 + lift - 1.6 * (st.lock || 0)],
+    sheath,
+    neck,
+    whisker:whisker?.at || neck,
+    capsid,
+    surface,
+    receptor,
+    tailTube,
+    gp5Tip,
+    virusDna,
+    outerMembrane,
+    peptidoglycan,
+    innerMembrane
+  };
+}
+
+function t4StageLabelTargets(st, seeThrough = false) {
+  const stage = st.anim || st.stage;
+  const sets = [
+    ['capsid', 'virusDna', 'whisker', 'sheath'],
+    ['longFibre', 'receptor', 'surface', 'whisker'],
+    ['longFibre', 'shortFibre', 'baseplate', 'receptor'],
+    ['sheath', 'outerMembrane', 'peptidoglycan', 'innerMembrane'],
+    ['virusDna', 'innerMembrane', 'surface']
+  ];
+  const targets = new Set(sets[Math.max(0, Math.min(4, stage))] || sets[0]);
+  if (seeThrough && stage === 3) {
+    targets.add('tailTube');
+    targets.add('gp5Tip');
+  }
+  if (seeThrough && stage === 4) targets.add('tailTube');
+  return targets;
+}
+
+const t4TextUnits = text => [...text].reduce((sum, ch) =>
+  sum + (/[\u3000-\u9fff]/.test(ch) ? 1 : .62), 0);
+
+function t4TagSize(text) {
+  const u = window.LBL_U ? LBL_U() : 0;
+  const n = ((window.__ln || (window.__ln = {}))[text] || (__ln[text] = Object.keys(__ln).length + 1));
+  const k = INK_K;
+  const fs = u ? 10 * u : 8.6 * k;
+  const h = u ? 17 * u : fs * 1.8;
+  const w = u ? h * (n > 9 ? 1.3 : 1) : t4TextUnits(text) * fs + fs * 1.5;
+  return { w, h, k, n, fs, u };
+}
+
+function t4Tag(target, p3, dx, dy, text, on = false, center = null) {
+  const { w, h, k, n, fs, u } = t4TagSize(text);
+  const [X, Y] = P(...p3);
+  const cx = center ? center[0] : X + dx * k;
+  const cy = center ? center[1] : Y + dy * k;
+  return `<g class="tag${on ? ' on' : ''}" data-n="${n}" data-t="${text}" data-anchor="${target}" data-at="${p3.join(',')}" data-ax="${f(X)}" data-ay="${f(Y)}"><path d="M${f(X)} ${f(Y)}L${f(cx)} ${f(cy)}" fill="none" stroke="${INK}" stroke-width="1"/>`
+    + `<circle cx="${f(X)}" cy="${f(Y)}" r="${f(1.3 * k)}" fill="${INK}"/>`
+    + `<rect x="${f(cx - w / 2)}" y="${f(cy - h / 2)}" width="${f(w)}" height="${f(h)}" rx="${f(h / 2)}" fill="${on ? 'var(--accent,#f4b829)' : '#fff4d6'}" stroke="${INK}" stroke-width="1.2"/>`
+    + `<text x="${f(cx)}" y="${f(cy + fs * .36)}" font-size="${f(fs)}" text-anchor="middle" font-family="ui-monospace,Menlo,monospace" font-weight="800" letter-spacing=".04em" fill="${INK}">${u ? n : text}</text></g>`;
+}
+
+function t4Callouts(items, B) {
+  const pts = [];
+  for (const x of [B[0], B[1]]) for (const y of [B[2], B[3]]) for (const z of [B[4], B[5]]) pts.push(P(x, y, z));
+  const xmin = Math.min(...pts.map(p => p[0])), xmax = Math.max(...pts.map(p => p[0])), cx = (xmin + xmax) / 2;
+  const k = INK_K, u = window.LBL_U ? LBL_U() : 0, fs = u ? 10 * u : 8.6 * k;
+  const hgt = u ? 17 * u : fs * 1.8, gap = hgt + (u ? 3 * u : 3 * k);
+  const left = [], right = [];
+  const svgEl = document.getElementById('fig'), vb = svgEl.viewBox.baseVal, btn = document.getElementById('btns');
+  const wMax = u ? hgt * 1.3 + 12 * k : Math.max(...items.map(it => t4TextUnits(it.text))) * fs + fs * 1.5 + 12 * k;
+  const roomL = xmin - vb.x >= wMax, roomR = vb.x + vb.width - xmax >= wMax;
+  const entries = items.map(it => {
+    const [X, Y] = P(...it.at);
+    return { ...it, X, Y };
+  });
+  if (items.length >= 2) {
+    for (const it of entries) (it.X < cx ? left : right).push(it);
+    const moveNearestCenter = (from, to) => {
+      let best = 0;
+      for (let i = 1; i < from.length; i++) {
+        if (Math.abs(from[i].X - cx) < Math.abs(from[best].X - cx)) best = i;
+      }
+      to.push(from.splice(best, 1)[0]);
+    };
+    while (left.length - right.length > 1) moveNearestCenter(left, right);
+    while (right.length - left.length > 1) moveNearestCenter(right, left);
+  } else {
+    const side = roomL || !roomR ? left : right;
+    for (const it of entries) side.push(it);
+  }
+  let out = '';
+  const top = { [-1]:fs, [1]:fs + 30 * k };
+  if (btn && svgEl.getScreenCTM()) {
+    const r = btn.getBoundingClientRect();
+    const q = new DOMPoint(r.right, r.bottom + 50).matrixTransform(svgEl.getScreenCTM().inverse());
+    if (q.y > 0) top[-1] = q.y + hgt;
+  }
+  for (const [col, side] of [[left, -1], [right, 1]]) {
+    col.sort((a, b) => a.Y - b.Y);
+    let yy = -1e9;
+    for (const c of col) {
+      c.py = Math.max(c.Y, yy + gap, top[side]);
+      yy = c.py;
+    }
+    const shift = col.length ? Math.max(0, col.reduce((a, c) => a + c.py - c.Y, 0) / col.length) : 0;
+    const room = col.length ? col[0].py - top[side] : 0;
+    for (const c of col) c.py -= Math.min(shift, room);
+    for (const c of col) {
+      c.n = ((window.__ln || (window.__ln = {}))[c.text] || (__ln[c.text] = Object.keys(__ln).length + 1));
+      const w = u ? hgt * (c.n > 9 ? 1.3 : 1) : t4TextUnits(c.text) * fs + fs * 1.5;
+      let px = side < 0 ? xmin - 10 * k - w / 2 : xmax + 10 * k + w / 2;
+      px = Math.max(vb.x + w / 2 + 2 * k, Math.min(vb.x + vb.width - w / 2 - 2 * k, px));
+      const ex = px - side * w / 2;
+      out += `<g class="tag${c.on ? ' on' : ''}" data-n="${c.n}" data-t="${c.text}" data-anchor="${c.target}" data-at="${c.at.join(',')}" data-ax="${f(c.X)}" data-ay="${f(c.Y)}"><path d="M${f(c.X)} ${f(c.Y)}L${f(ex + side * -4 * k)} ${f(c.py)}L${f(ex)} ${f(c.py)}" fill="none" stroke="${INK}" stroke-width="1"/>`
+        + `<circle cx="${f(c.X)}" cy="${f(c.Y)}" r="${f(1.4 * k)}" fill="${INK}"/>`
+        + `<rect x="${f(px - w / 2)}" y="${f(c.py - hgt / 2)}" width="${f(w)}" height="${f(hgt)}" rx="${f(hgt / 2)}" fill="${c.on ? 'var(--accent,#f4b829)' : '#fff4d6'}" stroke="${INK}" stroke-width="1.2"/>`
+        + `<text x="${f(px)}" y="${f(c.py + fs * .36)}" font-size="${f(fs)}" text-anchor="middle" font-family="ui-monospace,Menlo,monospace" font-weight="800" letter-spacing=".04em" fill="${INK}">${u ? c.n : c.text}</text></g>`;
+    }
+  }
+  return out;
+}
+
+function t4SurfaceTags(st) {
+  const tx = t4Lang(st);
+  const a = t4LabelAnchors(st);
+  const active = t4StageLabelTargets(st, false);
+  const items = [
+    { target:'capsid', at:a.capsid, text:tx.capsid },
+    { target:'virusDna', at:a.virusDna, text:tx.virusDna },
+    { target:'whisker', at:a.whisker, text:tx.neckTag },
+    { target:'sheath', at:a.sheath, text:tx.sheathTag },
+    { target:'longFibre', at:a.longFibre, text:tx.longFibre },
+    { target:'shortFibre', at:a.shortFibre, text:tx.shortFibre },
+    { target:'baseplate', at:a.baseplate, text:tx.baseplate },
+    { target:'receptor', at:a.receptor, text:tx.seeLabels[6] },
+    { target:'surface', at:a.surface, text:tx.surface },
+    { target:'outerMembrane', at:a.outerMembrane, text:tx.seeLabels[7] },
+    { target:'peptidoglycan', at:a.peptidoglycan, text:tx.seeLabels[8] },
+    { target:'innerMembrane', at:a.innerMembrane, text:tx.seeLabels[9] }
+  ];
+  return t4Callouts(
+    items.filter(item => active.has(item.target))
+      .map(item => ({ ...item, on:item.target === 'virusDna' && (st.inject || 0) > .01 })),
+    [0, T4_W, 0, T4_D, 0, T4_H]
+  );
+}
+
+function t4SeeLabels(st) {
+  const tx = t4Lang(st);
+  const a = t4LabelAnchors(st);
+  const active = t4StageLabelTargets(st, true);
+  const items = [
+    { target:'capsid', at:a.capsid, text:tx.capsid },
+    { target:'virusDna', at:a.virusDna, text:tx.virusDna },
+    { target:'whisker', at:a.whisker, text:tx.neckTag },
+    { target:'sheath', at:a.sheath, text:tx.seeLabels[3] },
+    { target:'tailTube', at:a.tailTube, text:tx.seeLabels[4] },
+    { target:'gp5Tip', at:a.gp5Tip, text:tx.seeLabels[5] },
+    { target:'longFibre', at:a.longFibre, text:tx.seeLabels[0] },
+    { target:'shortFibre', at:a.shortFibre, text:tx.seeLabels[1] },
+    { target:'baseplate', at:a.baseplate, text:tx.seeLabels[2] },
+    { target:'receptor', at:a.receptor, text:tx.seeLabels[6] },
+    { target:'surface', at:a.surface, text:tx.surface },
+    { target:'outerMembrane', at:a.outerMembrane, text:tx.seeLabels[7] },
+    { target:'peptidoglycan', at:a.peptidoglycan, text:tx.seeLabels[8] },
+    { target:'innerMembrane', at:a.innerMembrane, text:tx.seeLabels[9] }
+  ];
+  return items.filter(item => active.has(item.target))
+    .map(item => ({ ...item, on:item.target === 'virusDna' && (st.inject || 0) > .01 }));
+}
+
+function t4Scene(st, m) {
+  const lift = t4Lift(st);
+  const contract = st.contract || 0;
+  const headBottom = 70.4 + lift - 27 * contract;
+  const head = t4Capsid(st, T4_AX, T4_AY, headBottom, m);
+  const neck = t4Neck(T4_AX, T4_AY, headBottom - 4.1, headBottom);
+  const whiskers = t4Whiskers(T4_AX, T4_AY, headBottom - 3.1);
+  const sheath = t4Sheath(st, T4_AX, T4_AY);
+  const base = t4Baseplate(st, T4_AX, T4_AY);
+  const fibres = t4FibreParts(st, T4_AX, T4_AY);
+  const shortFibres = t4ShortFibres(st, T4_AX, T4_AY);
+  const see = ease(st.xr || 0);
+  const tubeTipZ = 20.1 + lift - T4_TUBE_PENETRATION * contract;
+
+  const flagella = t4FlagellaParts();
+  const hostCenterDepth = depthOf([T4_AX, T4_AY, T4_HOST_TOP * .5]);
+  const backFlagella = flagella.filter(f => depthOf(f.at) <= hostCenterDepth)
+    .map(f => `<g data-depth-layer="back">${f.svg}</g>`).join('');
+  const frontFlagella = flagella.filter(f => depthOf(f.at) > hostCenterDepth)
+    .map(f => `<g data-depth-layer="front">${f.svg}</g>`).join('');
+  let svg = backFlagella
+    + `<g data-part="bacterium">${t4HostUpper(st, m)}${frontFlagella}</g>`;
+
+  const outerParts = [
+    { box:head.box, svg:act('head', `<g data-part="capsid">${head.svg}</g>`) },
+    { box:neck.box, svg:neck.svg },
+    ...whiskers,
+    { box:sheath.box, svg:act('sheath', sheath.svg) },
+    ...base.parts.map(p => ({ ...p, svg:act('baseplate', p.svg) })),
+    ...fibres,
+    ...shortFibres
+  ];
+
+  if (see > 0.01) {
+    const internal = t4DnaInjection(st, T4_AX, T4_AY, headBottom, tubeTipZ, 'full');
+    svg += `<g opacity="${f(1 - .68 * see)}">${byDepth(outerParts)}</g>`;
+    svg += `<g opacity="${f(see)}">${internal}</g>`;
+    svg += `<g opacity="${f(see)}">${t4TubeTip(st, T4_AX, T4_AY)}</g>`;
+    if (see > .6) svg += t4Callouts(t4SeeLabels(st), [0, T4_W, 0, T4_D, 0, T4_H]);
+  } else {
+    svg += byDepth(outerParts);
+    svg += t4TubeTip(st, T4_AX, T4_AY);
+    svg += t4DnaInjection(st, T4_AX, T4_AY, headBottom, tubeTipZ, 'host');
+    svg += t4SurfaceTags(st);
+  }
+  return svg;
+}
+
+function t4StateForStage(stage) {
+  return {
+    stage,
+    lift: stage === 0 ? T4_START_LIFT : stage === 1 ? T4_ATTACH_LIFT : T4_LOCKED_LIFT,
+    attach: stage >= 1 ? 1 : 0,
+    lock: stage >= 2 ? 1 : 0,
+    contract: stage >= 3 ? 1 : 0,
+    inject: stage >= 4 ? 1 : 0
+  };
+}
+
+function t4RunSegment(st, target, api) {
+  const tx = t4Lang(st);
+  if (st.anim) {
+    api.flash(tx.wait(st.anim), 1500);
+    return;
+  }
+  if (target > st.stage + 1) {
+    api.flash(`${tx.needFirst(st.stage)}${t4Title(T4_STEPS[st.stage], st)}`, 1800);
+    return;
+  }
+
+  const base = Math.max(0, target - 1);
+  Object.assign(st, t4StateForStage(base), { anim:target, segK:0 });
+  const duration = [0, 1.65, 1.25, 1.55, 2.35][target];
+  let elapsed = 0;
+  api.animate(dt => {
+    elapsed = Math.min(duration, elapsed + dt);
+    const k = ease(elapsed / duration);
+    st.segK = k;
+    if (target === 1) {
+      st.lift = T4_START_LIFT + (T4_ATTACH_LIFT - T4_START_LIFT) * k;
+      st.attach = k;
+    } else if (target === 2) {
+      st.lock = k;
+      st.lift = T4_ATTACH_LIFT + (T4_LOCKED_LIFT - T4_ATTACH_LIFT) * k;
+    } else if (target === 3) {
+      st.contract = k;
+    } else if (target === 4) {
+      st.inject = k;
+    }
+    if (elapsed < duration) return true;
+
+    const final = t4StateForStage(target);
+    Object.assign(st, final, { anim:null, segK:1 });
+    api.flash(t4Title(T4_STEPS[target - 1], st), 1700);
+    return false;
+  });
+}
+
+function t4Reset(st, api) {
+  Object.assign(st, t4StateForStage(0), { anim:null, segK:0 });
+  api.flash(t4Lang(st).reset, 1500);
+}
+
+const t4Shown = st => Math.max(0, Math.min(4, st.stage));
+const t4Progress = st => st.anim
+  ? ((st.anim - 1) + (st.segK || 0)) * 25
+  : t4Shown(st) * 25;
+const t4ActiveStep = st => {
+  const index = st.anim ? st.anim - 1 : t4Shown(st) - 1;
+  return index >= 0 ? T4_STEPS[index] : null;
+};
+
+let ui;
+ui = mountFigure({
+  fig:'01',
+  turn:'full',
+  title:'T4 噬菌体注入 DNA',
+  palette:'mint',
+  size:[T4_W, T4_D, T4_H],
+  center:[T4_AX, T4_AY],
+  state:{ lang:'zh', stage:0, lift:T4_START_LIFT, attach:0, lock:0, contract:0, inject:0, anim:null, segK:0, xr:0, xrT:0 },
+  scene:t4Scene,
+  readout:st => t4ActiveStep(st) ? t4Title(t4ActiveStep(st), st) : '',
+  stats:st => {
+    const tx = t4Lang(st);
+    const progress = Math.round(t4Progress(st));
+    return [
+      {
+        label:tx.flowTitle,
+        value:`${tx.overview}<span class="t4-progress" aria-hidden="true"><i style="width:${progress}%"></i></span>`
+      }
+    ];
+  },
+  buttons:[
+    { label:'宿主受体识别', onClick:(st, api) => t4RunSegment(st, 1, api) },
+    { label:'基板构象锁定', onClick:(st, api) => t4RunSegment(st, 2, api) },
+    { label:'尾鞘收缩与穿膜', onClick:(st, api) => t4RunSegment(st, 3, api) },
+    { label:'基因组注入', onClick:(st, api) => t4RunSegment(st, 4, api) },
+    { label:'重置演示', onClick:(st, api) => t4Reset(st, api) }
+  ],
+  acts:{
+    head:(st, el, api) => api.flash(st.inject >= .99 ? t4Lang(st).headEmpty : t4Lang(st).headFull(Math.round((1 - st.inject) * 100)), 2400),
+    sheath:(st, el, api) => api.flash(t4Lang(st).sheathNote, 2300),
+    baseplate:(st, el, api) => api.flash(t4Lang(st).baseplateNote, 2200)
+  },
+  params:(st, q) => {
+    if (q.get('lang') === 'en') st.lang = 'en';
+    if (q.get('lang') === 'zh') st.lang = 'zh';
+    if (q.has('stage')) Object.assign(st, t4StateForStage(Math.max(0, Math.min(4, +q.get('stage') || 0))));
+    for (const key of ['lift', 'attach', 'lock', 'contract', 'inject']) {
+      if (q.has(key)) st[key] = Math.max(0, Math.min(key === 'lift' ? T4_START_LIFT : 1, +q.get(key) || 0));
+    }
+    st.anim = null;
+    if (q.get('xr') === '1') st.xr = st.xrT = 1;
+  }
+});
+
+xrMount(() => ui, () => '');
+
+const t4SwitchHost = document.createElement('div');
+t4SwitchHost.className = 'ctl t4-switchctl';
+const t4SwitchLabel = document.createElement('label');
+t4SwitchLabel.textContent = t4Lang(ui.st).display;
+const t4SwitchSet = document.querySelector('.vset');
+t4SwitchHost.append(t4SwitchLabel);
+if (t4SwitchSet) {
+  t4SwitchSet.style.setProperty('position', 'static', 'important');
+  t4SwitchSet.style.setProperty('top', 'auto', 'important');
+  t4SwitchSet.style.setProperty('right', 'auto', 'important');
+  t4SwitchHost.appendChild(t4SwitchSet);
+}
+document.querySelector('.controls').appendChild(t4SwitchHost);
+const t4KeepSwitchesAtBottom = () => {
+  if (t4SwitchSet && t4SwitchSet.parentElement !== t4SwitchHost) {
+    t4SwitchHost.appendChild(t4SwitchSet);
+  }
+};
+new MutationObserver(t4KeepSwitchesAtBottom).observe(document.querySelector('.stage'), { childList:true });
+new MutationObserver(t4KeepSwitchesAtBottom).observe(document.querySelector('.controls'), { childList:true });
+requestAnimationFrame(() => requestAnimationFrame(t4KeepSwitchesAtBottom));
+
+const t4LangButton = document.createElement('button');
+t4LangButton.id = 't4lang';
+t4LangButton.type = 'button';
+t4LangButton.textContent = '中 / EN';
+t4LangButton.setAttribute('aria-label', 'Switch language / 切换语言');
+const t4LangHost = document.createElement('div');
+t4LangHost.className = 'ctl t4-langctl';
+const t4LangLabel = document.createElement('label');
+t4LangLabel.textContent = t4Lang(ui.st).language;
+t4LangHost.append(t4LangLabel, t4LangButton);
+document.querySelector('.controls').appendChild(t4LangHost);
+
+function t4SyncLanguage() {
+  const tx = t4Lang(ui.st);
+  document.documentElement.lang = ui.st.lang === 'en' ? 'en' : 'zh-CN';
+  document.title = tx.title;
+  const heading = document.querySelector('header h1');
+  if (heading) heading.textContent = tx.headerPrefix + tx.title;
+
+  [...document.querySelectorAll('#btns .act')].slice(0, 5).forEach((button, index) => {
+    button.textContent = tx.buttons[index];
+  });
+
+  const controlLabels = [...document.querySelectorAll('.controls > .ctl > label')];
+  if (controlLabels[0]) controlLabels[0].textContent = tx.controls[0];
+  if (controlLabels[1]) controlLabels[1].textContent = tx.controls[1];
+  if (controlLabels[2]) controlLabels[2].textContent = tx.controls[2];
+  if (controlLabels[3]) controlLabels[3].textContent = tx.controls[3];
+  t4SwitchLabel.textContent = tx.display;
+  t4LangLabel.textContent = tx.language;
+
+  const front = document.getElementById('vreset');
+  const spin = document.getElementById('vspin');
+  const xray = document.getElementById('xrb');
+  const labels = document.getElementById('lblb');
+  const credit = document.querySelector('.made-with a');
+  if (front) front.textContent = tx.front;
+  if (spin) spin.textContent = tx.turntable;
+  if (xray) xray.textContent = tx.seeThrough;
+  if (labels) labels.textContent = tx.labels;
+  if (credit) credit.textContent = tx.credit;
+  const figure = document.getElementById('fig');
+  if (figure) figure.setAttribute('aria-label', tx.title);
+  document.querySelectorAll('#pals .sw').forEach((swatch, index) => {
+    const name = tx.palettes[index];
+    if (name) {
+      swatch.title = name;
+      swatch.setAttribute('aria-label', name);
+    }
+  });
+
+  t4LangButton.setAttribute('aria-pressed', ui.st.lang === 'en' ? 'true' : 'false');
+  ui.render();
+  requestAnimationFrame(t4AlignPanel);
+}
+
+t4LangButton.addEventListener('click', () => {
+  ui.st.lang = ui.st.lang === 'en' ? 'zh' : 'en';
+  t4SyncLanguage();
+});
+
+function t4AlignPanel() {
+  const stage = document.querySelector('.stage');
+  const title = document.querySelector('header h1');
+  const actions = document.getElementById('btns');
+  const stats = document.getElementById('stats');
+  if (!stage || !title || !actions || !stats) return;
+  const stageRect = stage.getBoundingClientRect();
+  const titleRect = title.getBoundingClientRect();
+  const actionsRect = actions.getBoundingClientRect();
+  stats.style.setProperty('top', `${Math.round(titleRect.top - stageRect.top)}px`, 'important');
+  stats.style.setProperty('left', `${Math.round(actionsRect.right - stageRect.left + 18)}px`, 'important');
+  stats.style.setProperty('right', '0', 'important');
+  stats.style.setProperty('width', 'auto', 'important');
+  stats.style.setProperty('max-width', '620px', 'important');
+}
+addEventListener('resize', t4AlignPanel);
+new ResizeObserver(t4AlignPanel).observe(document.querySelector('.stage'));
+new ResizeObserver(t4AlignPanel).observe(document.querySelector('header h1'));
+new ResizeObserver(t4AlignPanel).observe(document.getElementById('btns'));
+
+const t4UiStyles = document.createElement('style');
+t4UiStyles.textContent = `
+  @font-face {
+    font-family:'Unifont Embedded';
+    src:url('../assets/fonts/unifont-18.0.01-subset.woff2') format('woff2');
+    font-style:normal;
+    font-weight:400;
+    font-display:swap;
+  }
+  html, body, body * {
+    font-family:'Unifont Embedded','Unifont','Courier New',monospace !important;
+    -webkit-font-smoothing:none;
+    text-rendering:geometricPrecision;
+    font-synthesis:none;
+  }
+  body{font-size:16px;line-height:1.45}
+  header, #fig, .stage, .controls, .idea {max-width:900px}
+  header h1{font-size:16px;font-weight:700;letter-spacing:0}
+  header span{font-size:12px}
+  .stage{isolation:isolate}
+  #fig{max-width:900px;position:relative;z-index:0}
+  .actions{top:2px;z-index:40;width:max-content;max-width:280px;align-items:flex-start;gap:7px;pointer-events:auto}
+  .actions .stepwrap,.actions .act{width:auto}
+  .actions .act{text-align:left;white-space:nowrap}
+  .act{font-size:16px;line-height:1.35;padding:6px 15px;border-radius:999px;background:rgba(242,239,231,.94)}
+  .act:hover{background:var(--accent)}
+  .act,.chip,.chips,.zchip,.toast,.kpad,.kpad .k,.kpad .go{box-shadow:none!important}
+  #t4lang{margin:0;border:1.5px solid var(--ink);border-radius:999px;background:#fff4d6;color:var(--ink);padding:5px 12px;font-size:16px;cursor:pointer;align-self:flex-start}
+  #t4lang:hover{background:#e6e0d1}
+  #t4lang[aria-pressed=true]{background:#fff4d6;color:var(--ink)}
+  #stats{
+    top:2px!important;left:300px;right:0;width:auto;max-width:620px;display:grid;z-index:30;pointer-events:none;
+    grid-template-columns:repeat(4,minmax(0,1fr));
+    gap:7px 14px;align-items:start;text-align:left;
+  }
+  .stat{align-items:flex-start;text-align:left}
+  .stat .k{font-size:12px;line-height:1.3;letter-spacing:.05em;color:var(--muted);text-transform:none}
+  .stat .v{font-size:24px;line-height:1.15;letter-spacing:0;font-variant-numeric:tabular-nums;color:var(--ink)}
+  .stat:first-child{grid-column:1 / -1;padding:0 0 8px;border-bottom:1px solid var(--rule)}
+  .stat:first-child .v{font-size:16px;line-height:1.42;font-weight:400;max-width:none;text-align:left;white-space:normal}
+  .stat:not(:first-child){padding-top:1px}
+  .stat:not(:first-child) .v{font-size:20px}
+  .t4-progress{display:block;height:8px;margin-top:7px;border:1.5px solid var(--ink);background:var(--paper);overflow:hidden}
+  .t4-progress i{display:block;height:100%;background:var(--accent);transition:width .18s ease}
+  .controls{position:relative!important;z-index:100!important;isolation:isolate;pointer-events:auto;background-color:var(--paper);background-image:inherit;background-size:320px 320px;background-repeat:repeat;border-top-color:var(--ink);grid-template-columns:repeat(5,minmax(0,1fr));gap:14px 18px;align-items:start}
+  .controls .ctl{min-width:0;position:relative;z-index:1;cursor:default}
+  .controls button,.controls input,.controls .sw{cursor:pointer!important}
+  .controls label{pointer-events:none}
+  .controls .row{flex-wrap:nowrap}
+  .ctl label,.made-with{font-size:12px}
+  .row button{font-size:16px}
+  .sw{width:28px;height:28px}
+  .t4-switchctl .vset{position:static!important;top:auto!important;right:auto!important;margin:0}
+  .t4-switchctl .vset .vrow{gap:6px;flex-wrap:nowrap}
+  .t4-switchctl .vset .act{padding:4px 8px}
+  @media (max-width:760px){
+    #stats{left:290px;width:auto;grid-template-columns:1fr}
+    .stat:first-child{grid-column:1 / -1}
+    .stat:not(:first-child) .v{font-size:18px}
+  }
+  @media (max-width:560px){
+    body{font-size:16px;padding:12px 10px 24px}
+    body > header{display:flex!important;align-items:center;gap:12px}
+    #fig,.stage,.controls{max-width:100%}
+    .actions{width:100%;max-width:none;display:flex;flex-direction:row;flex-wrap:wrap;align-items:flex-start;gap:6px}
+    .stepwrap:nth-child(5){grid-column:auto}
+    .act{width:100%;white-space:normal;text-align:center;padding:6px 8px}
+    #stats{position:static;left:auto;width:100%;display:grid;grid-template-columns:1fr 1fr;gap:6px 12px;margin:0 0 4px}
+    .stat:first-child{grid-column:1 / -1}
+    .stat:first-child .v{font-size:16px}
+    .stat:not(:first-child) .v{font-size:18px}
+    .stat .k{font-size:12px}
+    .controls{grid-template-columns:repeat(2,minmax(0,1fr))}
+    .ctl label,.made-with{font-size:12px}
+  }
+`;
+document.head.appendChild(t4UiStyles);
+
+const t4FigureSurface = document.getElementById('fig');
+const t4UiHitSurfaces = () => [
+  ...document.querySelectorAll('.controls, .actions, .vset, #stats, .made-with, body > header')
+];
+t4FigureSurface.addEventListener('pointerdown', event => {
+  const overUi = t4UiHitSurfaces().some(element => {
+    const rect = element.getBoundingClientRect();
+    return rect.width > 0 && rect.height > 0
+      && event.clientX >= rect.left && event.clientX <= rect.right
+      && event.clientY >= rect.top && event.clientY <= rect.bottom;
+  });
+  if (!overUi) return;
+  event.preventDefault();
+  event.stopImmediatePropagation();
+}, true);
+
+t4SyncLanguage();
+</script>
+<style>@media (max-width:560px),(pointer:coarse){#art{filter:none!important}.ctl:has(#wb){display:none!important}}</style><style>@media (max-width:560px){html body .kpad{width:100%;box-sizing:border-box;justify-content:space-between;gap:10px;margin:10px 0 0;padding:0;border:0;background:none;box-shadow:none}
+html body .kpad .dp{display:flex;gap:8px}html body .kpad .hub{display:none}
+html body .kpad .k{width:46px;height:42px;font-size:14px;border-radius:9px}
+html body .kpad .go{width:auto;height:42px;padding:0 26px;border-radius:999px;flex-direction:row;font-size:13px;box-shadow:0 3px 0 var(--ink),inset 0 -4px 0 rgba(0,0,0,.18)}
+html body .kpad .go small{display:none}html body .kpad .go.down{transform:translateY(2px);box-shadow:0 1px 0 var(--ink),inset 0 -2px 0 rgba(0,0,0,.18)}}</style>
+<script>requestAnimationFrame(() => { const o = { "◀": 0, "▲": 1, "▼": 2, "▶": 3 }; for (const k of document.querySelectorAll(".kpad .k")) k.style.order = o[k.textContent] ?? 0; });</script><style>@media (max-width:560px){.vset{margin:8px 0 2px!important}}</style><script>requestAnimationFrame(() => { const v = document.querySelector(".vset"), s = document.getElementById("stats"), z = document.querySelector(".zwrap"); if (!v) return; if (z && z.parentNode === v.parentNode){ const kp = document.querySelector(".kpad"); if (kp && innerWidth <= 560){ z.after(kp); kp.after(v); } else z.after(v); } else if (s && s.parentNode) s.parentNode.insertBefore(v, s); });</script><script>(() => { const fit = () => { const fig = document.getElementById("fig"); if (!fig) return;
+  fig.style.maxHeight = ""; if (innerWidth <= 560) return;
+  const extra = document.documentElement.scrollHeight - fig.clientHeight, room = innerHeight - extra - 12;
+  if (room < fig.clientHeight) fig.style.maxHeight = Math.max(320, room) + "px"; };
+  addEventListener("load", () => requestAnimationFrame(fit)); addEventListener("resize", fit); setTimeout(fit, 400); })();</script><style>.zwrap{position:relative}.zwrap.on{overflow:hidden}@media (min-width:561px){.zwrap.on{overflow:visible}html.zoomed,html.zoomed body{overflow:hidden}}.zwrap #fig{transform-origin:0 0}
+.zchip{position:absolute;right:2px;bottom:6px;display:flex;align-items:center;gap:2px;font:600 11px ui-monospace,Menlo,monospace;
+ background:rgba(242,239,231,.88);border:1px solid rgba(35,30,22,.25);border-radius:999px;padding:2px;z-index:3;user-select:none}
+.zchip button{all:unset;cursor:pointer;min-width:22px;height:22px;line-height:22px;text-align:center;border-radius:999px;color:#231e16}
+.zchip button:hover{background:rgba(35,30,22,.08)}.zchip .zp{min-width:44px}</style>
+<script>(() => { const fig = document.getElementById("fig"); if (!fig) return;
+  const wrap = document.createElement("div"); wrap.className = "zwrap"; fig.parentNode.insertBefore(wrap, fig); wrap.appendChild(fig);
+  const chip = document.createElement("div"); chip.className = "zchip";
+  chip.innerHTML = '<button class="zm" aria-label="Zoom out">−</button><button class="zp" aria-label="Reset zoom">100%</button><button class="zi" aria-label="Zoom in">+</button>';
+  wrap.appendChild(chip);
+  let s = 1, tx = 0, ty = 0;
+  const box = () => ({ w: fig.clientWidth, h: fig.clientHeight });
+  const apply = () => { const { w, h } = box(); s = Math.min(5, Math.max(1, s));
+    if (s <= 1.001){ s = 1; tx = ty = 0; } else { tx = Math.min(0, Math.max(w - w*s, tx)); ty = Math.min(0, Math.max(h - h*s, ty)); }
+    fig.style.transform = s === 1 ? "" : `translate(${tx}px,${ty}px) scale(${s})`; wrap.classList.toggle("on", s > 1); document.documentElement.classList.toggle("zoomed", s > 1);   /* desktop: nothing is cut off, the page just does not scroll while zoomed */
+    chip.querySelector(".zp").textContent = Math.round(s*100) + "%"; grain(); };
+  // the paper grain is noise in drawing units: zoomed, it would blow up into blotches, so its frequency rises with the
+  // zoom and it stays the same fine grain on screen (the filter is rebuilt on resize, so this re-applies then too)
+  const grain = () => { const fl = document.getElementById("hand"); if (!fl) return;
+    const ts = [...fl.querySelectorAll("feTurbulence")]; if (!ts.length) return;
+    const g = ts.find(t => t.getAttribute("result") === "n1") || ts.reduce((a, b) => parseFloat(b.getAttribute("baseFrequency")) > parseFloat(a.getAttribute("baseFrequency")) ? b : a);
+    if (!g.dataset.f0) g.dataset.f0 = g.getAttribute("baseFrequency");
+    const v = (parseFloat(g.dataset.f0) * s).toFixed(4); if (g.getAttribute("baseFrequency") !== v) g.setAttribute("baseFrequency", v); };
+  const fd = document.getElementById("fdefs"); if (fd) new MutationObserver(() => grain()).observe(fd, { childList: true, subtree: true });
+  const zoomAt = (k, px, py) => { const s2 = Math.min(5, Math.max(1, s*k)); tx = px - (px - tx)*s2/s; ty = py - (py - ty)*s2/s; s = s2; apply(); };
+  const local = e => { const r = wrap.getBoundingClientRect(); return [e.clientX - r.left, e.clientY - r.top]; };
+  wrap.addEventListener("wheel", e => {
+    if (e.ctrlKey || e.metaKey){ e.preventDefault(); const [x, y] = local(e); zoomAt(Math.exp(-Math.max(-50, Math.min(50, e.deltaY))*.006), x, y);   /* a wheel notch ~1.35x, a pinch stays smooth */ }
+    else if (s > 1){ e.preventDefault(); tx -= e.deltaX; ty -= e.deltaY; apply(); } }, { passive: false });
+  const center = () => { const { w, h } = box(); return [w/2, h/2]; };
+  chip.querySelector(".zi").onclick = () => zoomAt(1.5, ...center());
+  chip.querySelector(".zm").onclick = () => zoomAt(1/1.5, ...center());
+  chip.querySelector(".zp").onclick = () => { s = 1; apply(); };
+  chip.addEventListener("pointerdown", e => e.stopPropagation());
+  // two fingers: pinch to zoom and move to pan; the figure's own one-finger turn waits while they are down
+  const pts = new Map(); let pinch = null;
+  const two = () => { const [a, b] = [...pts.values()]; return { d: Math.hypot(a.x - b.x, a.y - b.y), x: (a.x + b.x)/2, y: (a.y + b.y)/2 }; };
+  wrap.addEventListener("pointerdown", e => { if (e.pointerType !== "touch") return; pts.set(e.pointerId, { x: e.clientX, y: e.clientY });
+    if (pts.size === 2){ pinch = two(); e.stopPropagation(); } }, true);
+  wrap.addEventListener("pointermove", e => { if (!pts.has(e.pointerId)) return; pts.set(e.pointerId, { x: e.clientX, y: e.clientY });
+    if (pinch && pts.size === 2){ e.stopPropagation(); e.preventDefault(); const n = two(), r = wrap.getBoundingClientRect();
+      tx += n.x - pinch.x; ty += n.y - pinch.y; zoomAt(n.d / pinch.d, n.x - r.left, n.y - r.top); pinch = n; } }, true);
+  const up = e => { pts.delete(e.pointerId); if (pts.size < 2) pinch = null; };
+  wrap.addEventListener("pointerup", up, true); wrap.addEventListener("pointercancel", up, true);
+  addEventListener("resize", apply);
+})();</script><style>.toast{position:absolute!important;left:50%!important;right:auto!important;top:6%!important;bottom:auto!important;z-index:4!important;
+  transform:translate(-50%,8px)!important;opacity:0!important;pointer-events:none!important;display:flex!important;align-items:center;gap:8px;
+  width:max-content;max-width:min(86%,440px);white-space:normal!important;font:600 12.5px/1.35 ui-monospace,Menlo,monospace!important;
+  letter-spacing:.01em!important;text-transform:none!important;color:#231e16!important;background:#fff1bf!important;
+  border:1px solid rgba(35,30,22,.28)!important;border-radius:8px!important;box-shadow:0 8px 22px rgba(35,30,22,.16)!important;
+  padding:7px 13px 7px 9px!important;transition:opacity .18s ease,transform .18s ease!important}
+.toast::before{content:"!";flex:none;width:17px;height:17px;border-radius:50%;background:#231e16;color:#fff1bf;font:800 11px/17px ui-monospace,Menlo,monospace;text-align:center}
+.toast.show{opacity:1!important;transform:translate(-50%,0)!important}</style>
+<script>(() => { const cap = () => { const t = document.getElementById("toast"); if (!t) return; const s = t.textContent;
+  if (s && s[0] !== s[0].toUpperCase()) t.textContent = s[0].toUpperCase() + s.slice(1); };
+  let seen = null; const watch = () => { const t = document.getElementById("toast"); if (!t || t === seen) return; seen = t;
+    const zw = document.querySelector(".zwrap"); if (zw && t.parentNode !== zw) zw.appendChild(t);   // sits on the figure itself
+    new MutationObserver(cap).observe(t, { childList: true, characterData: true, subtree: true }); cap(); };
+  watch(); const st = document.querySelector(".stage"); if (st) new MutationObserver(watch).observe(st, { childList: true }); })();</script><script>(() => { const fix = () => { const art = document.getElementById('art'); if (!art) return;
+    for (const el of art.querySelectorAll('[fill="#41538f" i]')){ let top = null, a = el.parentElement;
+      while (a && a !== art){ const o = a.getAttribute('opacity'); if (o !== null && +o < 1) top = a; a = a.parentElement; }
+      if (top) top.parentNode.insertBefore(el, top); } };
+  const go = () => { const art = document.getElementById('art'); if (!art) return setTimeout(go, 50); fix(); new MutationObserver(fix).observe(art, { childList: true }); };
+  if (document.readyState === 'loading') addEventListener('DOMContentLoaded', go); else go(); })();</script><style>.lgd{display:none}@media (max-width:560px){html:not(.nolabels) .lgd.has{display:grid}}
+.lgd{grid-template-columns:1fr 1fr;gap:2px 8px;margin:4px 0 12px;font:700 10.5px/1.25 ui-monospace,Menlo,monospace;letter-spacing:.03em;color:#231e16}
+.lgd button{all:unset;display:flex;align-items:center;gap:6px;cursor:pointer;padding:4px;border-radius:7px;-webkit-tap-highlight-color:transparent}
+.lgd b{flex:none;min-width:17px;height:17px;padding:0 3px;box-sizing:border-box;border-radius:999px;border:1.2px solid #231e16;background:#fff4d6;text-align:center;font:800 10px/15px ui-monospace,Menlo,monospace}
+.lgd .on b{background:var(--accent,#f4b829)}.lgd .sel{background:rgba(35,30,22,.09)}.lgd .sel b{background:#231e16;color:#fff4d6}</style>
+<script>(() => { const fig = document.getElementById("fig"); if (!fig) return;
+  const lg = document.createElement("div"); lg.className = "lgd"; const at = document.querySelector(".zwrap") || fig; at.parentNode.insertBefore(lg, at.nextSibling);
+  const hs = document.createElement("style"); document.head.appendChild(hs);
+  let sig = "", sel = 0, q = 0, names = "", num = new Map();
+  // the figure's own numbers count every label it has ever drawn; here they are reset to 1, 2, 3... down the left
+  // column then the right, each time the set of labels changes (so they hold still while the figure turns)
+  const renum = () => { if (innerWidth > 560) return; const gs = [...fig.querySelectorAll(".tag[data-t]")];
+    const key = gs.map(g => g.dataset.t).sort().join("|");
+    if (key !== names){ names = key; num = new Map(); const vb = fig.viewBox.baseVal, cx = vb.x + vb.width/2;
+      const at = g => { const r = g.querySelector("rect"); return r ? [+r.getAttribute("x") + r.getAttribute("width")/2, +r.getAttribute("y")] : [0, 0]; };
+      gs.map(g => [g.dataset.t, ...at(g)]).sort((a, b) => ((a[1] > cx) - (b[1] > cx)) || a[2] - b[2]).forEach(([t]) => { if (!num.has(t)) num.set(t, num.size + 1); }); }
+    for (const g of gs){ const n = String(num.get(g.dataset.t)); if (g.dataset.n !== n){ g.dataset.n = n; const t = g.querySelector("text"); if (t) t.textContent = n; } } };
+  const mark = () => { hs.textContent = sel ? `#fig .tag[data-n="${sel}"] rect{fill:#231e16!important}#fig .tag[data-n="${sel}"] text{fill:#fff4d6}#fig .tag[data-n="${sel}"] path{stroke-width:2.4}` : "";
+    for (const x of lg.children) x.classList.toggle("sel", +x.dataset.n === sel); };
+  const upd = () => { q = 0; const m = new Map();
+    if (innerWidth <= 560) for (const g of fig.querySelectorAll(".tag[data-n]")){ const n = +g.dataset.n; if (!m.has(n)) m.set(n, [g.dataset.t, g.classList.contains("on")]); }
+    const a = [...m].sort((x, y) => x[0] - y[0]), s = JSON.stringify(a); if (s === sig) return; sig = s;
+    lg.classList.toggle("has", a.length > 0);
+    lg.innerHTML = a.map(([n, [t, on]]) => `<button data-n="${n}" class="${on ? "on" : ""}"><b>${n}</b><span>${t}</span></button>`).join(""); mark(); };
+  lg.addEventListener("click", e => { const b = e.target.closest("button"); if (!b) return; sel = sel === +b.dataset.n ? 0 : +b.dataset.n; mark(); });
+  new MutationObserver(() => { renum(); if (!q) q = requestAnimationFrame(upd); }).observe(fig, { childList: true, subtree: true }); renum();
+  addEventListener("resize", () => { if (!q) q = requestAnimationFrame(upd); }); upd(); })();</script></body>
+</html>

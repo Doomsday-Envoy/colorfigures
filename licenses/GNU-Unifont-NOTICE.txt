@@ -1,0 +1,18 @@
+GNU Unifont 18.0.01
+Font family: Unifont
+Version: 18.0.01
+
+Copyright (C) 1998-2026 Roman Czyborra, Paul Hardy, Qianqian Fang,
+Andrew Miller, Johnnie Weaver, David Corbett, Aella Chiana Moskopp,
+Rebecca Bettencourt, Ho-Seok Ee, et al.
+
+Upstream: https://unifoundry.com/unifont/
+GNU release directory:
+https://ftp.gnu.org/gnu/unifont/unifont-18.0.01/
+
+License: SIL Open Font License 1.1
+
+This project redistributes a character-subset WOFF2 conversion at:
+assets/fonts/unifont-18.0.01-subset.woff2
+
+The complete license text is included in GNU-Unifont-OFL-1.1.txt.
