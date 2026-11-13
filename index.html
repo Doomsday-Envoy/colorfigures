@@ -47,6 +47,7 @@
     top:24px;
     left:clamp(12px,1.7vw,26px);
     width:var(--nav-width);
+    min-width:0;
     pointer-events:none;
   }
   .catalog-head{
@@ -72,6 +73,7 @@
   }
   .catalog-list{
     display:flex;
+    min-width:0;
     min-height:0;
     flex-direction:column;
     gap:6px;
@@ -216,6 +218,16 @@
       >
         <span class="catalog-number">01</span>
         <span class="catalog-name">T4噬菌体DNA注入</span>
+      </button>
+      <button
+        class="catalog-link"
+        type="button"
+        data-id="micropipette"
+        data-src="figures/微量移液器.html"
+        data-title="微量移液器"
+      >
+        <span class="catalog-number">02</span>
+        <span class="catalog-name">微量移液器</span>
       </button>
     </nav>
   </aside>
