@@ -23,11 +23,13 @@
 
 ## 字体
 
-作品目录页与 T4 页面使用 `GNU Unifont 18.0.01` 的 WOFF2 子集。微量移液器页面沿用 Colorfigures 的等宽界面字体，并为中文增加系统字体回退。
+作品目录页、T4 页面和微量移液器互动页统一使用 `GNU Unifont 18.0.01`
+的 WOFF2 子集，访客不需要安装像素字体。
 
-- 字体文件：`assets/fonts/unifont-18.0.01-subset.woff2`
-- 字体覆盖作品目录页和 T4 页面实际使用的字符
-- 新增作品若继续使用 Unifont，需要确认其字符子集覆盖页面文字
+- 字体文件：`assets/fonts/unifont-gallery-subset.woff2`
+- 字体覆盖作品目录、T4 和微量移液器三个页面实际使用的字符
+- 字体加载使用 `font-display:block`，避免先显示系统字体再切换
+- Colorfigures SVG 标签统一改为 Unifont，并收紧少量字距防止标注溢出
 
 如果后续作品增加了当前字体子集未包含的字符，需要重新生成字体子集。
 

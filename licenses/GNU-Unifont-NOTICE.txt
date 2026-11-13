@@ -13,6 +13,6 @@ https://ftp.gnu.org/gnu/unifont/unifont-18.0.01/
 License: SIL Open Font License 1.1
 
 This project redistributes a character-subset WOFF2 conversion at:
-assets/fonts/unifont-18.0.01-subset.woff2
+assets/fonts/unifont-gallery-subset.woff2
 
 The complete license text is included in GNU-Unifont-OFL-1.1.txt.
